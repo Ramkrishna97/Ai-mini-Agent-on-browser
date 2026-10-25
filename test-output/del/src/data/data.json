@@ -1,0 +1,1 @@
+{"instruction": "create project for crud operations using java ,springboot , react", "chunk": 1, "chunks": 1, "source": "", "project": {"files": [{"path": "src/data/data.json", "purpose": "Store sample data for testing and demonstration purposes."}], "current_file": {"path": "src/data/data.json", "purpose": "Store sample data for testing and demonstration purposes."}}}
