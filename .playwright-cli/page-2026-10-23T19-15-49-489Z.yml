@@ -1,0 +1,38 @@
+- main [ref=f2e2]:
+  - generic [ref=f2e3]:
+    - button "Toggle sidebar" [ref=f2e4] [cursor=pointer]: ☰
+    - button "Local Agent" [ref=f2e5] [cursor=pointer]:
+      - generic "Choose a model" [ref=f2e6]: Local Agent
+      - generic [aria-hidden] [ref=f2e7]: ⌄
+    - generic [ref=f2e8]: Complete
+    - button "Open activity and saved files" [ref=f2e9] [cursor=pointer]: ▤
+  - generic [ref=f2e12]:
+    - generic [ref=f2e13]:
+      - log "Conversation" [ref=f2e14]:
+        - generic [ref=f2e43]: /run Write-Output UI-check
+        - generic [ref=f2e46]: Finished. Saved 0 file(s) and ran 1 command(s).
+      - text: ›
+    - group [ref=f2e23]:
+      - generic [ref=f2e24]: Your message
+      - textbox "Your message" [ref=f2e26]:
+        - /placeholder: Describe what to build, or ask a follow-up question…
+      - generic [ref=f2e27]:
+        - button "+ Attach files" [ref=f2e29] [cursor=pointer]
+        - button "Send →↑" [disabled] [ref=f2e30]
+      - generic [ref=f2e31]: 0 / 4000
+    - dialog [ref=f2e49]:
+      - generic [ref=f2e50]:
+        - heading "Activity & files" [level=2] [ref=f2e51]
+        - button "Close Activity & files" [active] [ref=f2e52] [cursor=pointer]: ×
+      - generic [ref=f2e53]:
+        - generic [ref=f2e54]:
+          - heading "Workflow activity" [level=2] [ref=f2e55]
+          - generic [ref=f2e56]: Complete
+        - status [ref=f2e57]: Done. 0 files saved; 1 commands executed.
+        - group [ref=f2e58]:
+          - heading "Activity log" [level=3] [ref=f2e59]
+          - generic "Workflow log" [ref=f2e60]: "00:45:23 INFO Program routing: {\"action\": \"commands\", \"workspace\": \"E:\\\\Temp\\\\Ai-playground\\\\ai-agent-mini\", \"files\": [], \"project\": \"\", \"directories\": [], \"commands\": [\"Write-Output UI-check\"], \"needs_model\": false} 00:45:23 INFO Running explicit user command in E:\\Temp\\Ai-playground\\ai-agent-mini: Write-Output UI-check 00:45:23 INFO Command output: UI-check 00:45:23 INFO Command exit code: 0 00:45:23 INFO Workflow complete: 0 files saved, 1 commands executed."
+          - generic [ref=f2e61]:
+            - heading "Workflow output" [level=3] [ref=f2e62]
+            - paragraph [ref=f2e63]: E:\Temp\Ai-playground\ai-agent-mini
+            - list

@@ -1,0 +1,41 @@
+- generic [active] [ref=e1]:
+  - navigation "Workspace navigation" [ref=e2]:
+    - generic [ref=e3]: ⌘ Local Agent
+    - button "＋ New task" [ref=e4]
+    - button "▤ Activity & files" [ref=e5]
+    - button "⚙ Settings" [ref=e6]
+    - button "? Help & commands" [ref=e7]
+    - generic [ref=e8]:
+      - text: L
+      - generic [ref=e9]: Local workspaceai-agent-mini
+  - main [ref=e10]:
+    - generic [ref=e11]:
+      - button "Toggle sidebar" [expanded] [ref=e12]: ☰
+      - button "Local Agent" [ref=e13]: Local Agent⌄
+      - text: Ready
+      - button "Open activity and saved files" [ref=e14]: ▤
+    - generic [ref=e15]:
+      - paragraph [ref=e16]: LOCAL WORKFLOW / OLLAMA OR GGUF
+      - heading "Describe the work. Python handles the steps." [level=1] [ref=e17]: Describe the work.Python handles the steps.
+      - paragraph [ref=e18]: Reference files, generate a project, give explicit commands, or enable Agent mode for approved model tool use.
+    - generic [ref=e21]:
+      - log "Conversation" [ref=e23]:
+        - generic [ref=e24]:
+          - heading "What can we build today?" [level=1] [ref=e25]
+          - paragraph [ref=e26]: Your models. Your files. Your workspace.
+          - generic [ref=e27]:
+            - button "Build something" [ref=e28]
+            - button "Explain code" [ref=e29]
+            - button "Run a command" [ref=e30]
+      - group [ref=e32]:
+        - text: Your message
+        - textbox "Your message" [ref=e34]:
+          - /placeholder: Describe what to build, or ask a follow-up question…
+        - generic [ref=e35]:
+          - generic [ref=e36]:
+            - button "+ Attach files" [ref=e37]
+            - text: Read-only · up to 8 text, code, PDF or DOCX files
+          - button "Send →" [disabled] [ref=e38]
+        - list "Attached reference files"
+        - generic [ref=e39]: Enter to send · Shift+Enter for a new line. Type / for commands or @ for output files.0 / 4000
+    - generic [ref=e40]: Local workflow. Opt-in agent tools. You approve each tool action.

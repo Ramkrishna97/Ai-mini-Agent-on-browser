@@ -1,0 +1,24 @@
+- main [ref=f2e2]:
+  - generic [ref=f2e3]:
+    - button "Toggle sidebar" [ref=f2e4] [cursor=pointer]: ☰
+    - button "Local Agent" [ref=f2e5] [cursor=pointer]:
+      - generic "Choose a model" [ref=f2e6]: Local Agent
+      - generic [aria-hidden] [ref=f2e7]: ⌄
+    - generic [ref=f2e8]: Running
+    - button "Open activity and saved files" [ref=f2e9] [cursor=pointer]: ▤
+  - generic [ref=f2e12]:
+    - generic [ref=f2e13]:
+      - log "Conversation" [ref=f2e14]:
+        - generic [ref=f2e36]: /run Write-Output UI-check
+        - generic [ref=f2e39]: Working on it…
+      - text: ›
+    - generic [ref=f2e22]:
+      - group [ref=f2e23]:
+        - generic [ref=f2e24]: Your message
+        - textbox "Your message" [disabled] [ref=f2e26]:
+          - /placeholder: Describe what to build, or ask a follow-up question…
+        - generic [ref=f2e27]:
+          - button "+ Attach files" [disabled] [ref=f2e29]
+          - button "Send →↑" [disabled] [ref=f2e30]
+        - generic [ref=f2e31]: 0 / 4000
+      - button "Stop workflow" [ref=f2e42] [cursor=pointer]
