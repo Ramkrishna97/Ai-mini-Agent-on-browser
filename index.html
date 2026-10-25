@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Local Agent</title>
+  <link rel="stylesheet" href="/ui.css">
+  <script src="/ui.js" defer></script>
+</head>
+<body>
+  <nav class="sidebar" aria-label="Workspace navigation">
+    <div class="sidebar-brand"><span class="brand-icon">⌘</span> Local Agent</div>
+    <button type="button" id="sidebar-new"><span>＋</span> New task</button>
+    <button type="button" data-panel="activity"><span>▤</span> Activity &amp; files</button>
+    <button type="button" data-panel="settings"><span>⚙</span> Settings</button>
+    <button type="button" data-panel="help"><span>?</span> Help &amp; commands</button>
+    <div id="session-list" class="session-list" aria-label="Saved conversations"></div>
+    <div class="sidebar-bottom"><span class="workspace-avatar">L</span><div>Local workspace<small id="workspace-caption">On your machine</small></div></div>
+  </nav>
+  <main>
+    <header class="app-header">
+      <button type="button" id="toggle-sidebar" class="icon-button" aria-label="Toggle sidebar" aria-expanded="true">☰</button>
+      <button type="button" data-panel="settings" class="model-button"><span id="header-model">Local Agent</span><span aria-hidden="true">⌄</span></button>
+      <span id="top-status" class="top-status">Connecting</span>
+      <button type="button" data-panel="activity" class="icon-button" aria-label="Open activity and saved files">▤</button>
+    </header>
+    <section class="intro"><p class="eyebrow">LOCAL WORKFLOW / OLLAMA OR GGUF</p><h1>Describe the work.<br>Python handles the steps.</h1><p>Reference files, generate a project, give explicit commands, or enable Agent mode for approved model tool use.</p></section>
+    <div class="layout">
+      <section class="card">
+        <form id="workflow">
+          <fieldset id="config-controls" disabled>
+            <details id="workflow-config"><summary><span>Workspace &amp; model</span><span id="config-summary" class="config-summary">Connecting...</span></summary>
+            <label for="path">Workspace or file destination</label>
+            <input id="path" name="path" readonly placeholder="Connecting to the local workspace" aria-describedby="path-hint">
+            <div class="destination-buttons"><button id="choose-folder" type="button" class="secondary">Choose folder…</button><button id="choose-file" type="button" class="secondary">Choose file location…</button></div>
+            <p id="path-hint" class="hint">Existing file → edit with backup. New filename → create. Folder → generate a project. No mode selection is needed.</p>
+            <label for="name">Output name <span class="hint">(optional; leave as a folder for automatic file types)</span></label>
+            <input id="name" maxlength="180" placeholder="Optional project folder; filenames are chosen during project design" spellcheck="false">
+            <label for="provider">Model source</label>
+            <select id="provider" name="provider"><option value="ollama">Ollama</option><option value="gguf">Local GGUF file (no Ollama)</option></select>
+            <div id="ollama-picker"><label for="model">Choose an installed Ollama model</label><div class="picker"><select id="model" name="model" required><option value="">Loading installed models…</option></select><button id="refresh-models" class="secondary" type="button" aria-label="Refresh installed models">Refresh</button></div><p id="model-hint" class="hint" role="status">Discovering the models available in your local Ollama installation.</p><button id="offload-model" class="secondary" type="button">Offload loaded model</button><p id="model-preload" class="hint" role="status">No model loaded by this app.</p></div>
+            <div id="gguf-picker" hidden><label for="gguf-path">GGUF model file</label><input id="gguf-path" readonly placeholder="Select a .gguf file on this computer"><button id="choose-gguf" class="secondary" type="button">Choose GGUF file…</button><p class="hint">The app starts a local llama.cpp runtime automatically. On Windows, its official CPU build downloads once if needed; later runs work offline.</p></div>
+            <label class="agent-option"><input id="agent-mode" type="checkbox"> Agent mode: let the model request tools</label>
+            <p class="hint">Always allow approves future tool requests in this conversation, including files, commands, browser access, and enabled MCP tools. New conversations ask again. Agent mode requires a workspace folder and a tool-capable model.</p>
+            <div id="agent-options" hidden><label class="agent-option"><input id="browser-enabled" type="checkbox"> Enable headless browser tool</label><label class="agent-option"><input id="mcp-enabled" type="checkbox"> Enable MCP tools (built-in search and configured plugins)</label></div>
+            <details><summary>Generation settings</summary><div class="settings"><div><label for="temperature">Temperature</label><input id="temperature" type="number" min="0" max="2" step="0.1" value="0.2" required></div><div><label for="context_tokens">Max input context tokens per request</label><input id="context_tokens" type="number" min="8192" max="262144" value="16384" required></div><div><label for="max_tokens">Max output tokens per request</label><input id="max_tokens" type="number" min="128" max="16384" value="4096" required></div></div><p class="hint">Context must fit the output limit plus the working prompt. Choose Ollama or a local GGUF. Commands and folder creation do not require a model.</p></details>
+            </details>
+          </fieldset>
+            <div id="conversation" class="conversation" role="log" aria-label="Conversation" aria-live="polite"><p class="conversation-empty">Your conversation will appear here. Describe what to build to begin.</p></div>
+          <fieldset id="controls" disabled>
+            <label id="composer-label" for="instruction">Your message</label>
+            <div class="request-editor">
+            <textarea id="instruction" name="instruction" required maxlength="4000" rows="3" placeholder="Describe what to build, or ask a follow-up question…"></textarea>
+            <div id="suggestions" class="suggestions" role="listbox" aria-label="Request suggestions" hidden></div>
+            </div>
+            <div id="attachment-heading" class="attachment-heading"><button id="attach-file" class="text-button" type="button">Add reference files…</button><span class="hint">Read-only · up to 8 text, code, PDF or DOCX files</span></div>
+            <ul id="attachment-list" class="attachment-list" aria-label="Attached reference files"></ul>
+            <button id="new-task" class="text-button" type="button" hidden>Start a new task</button>
+            <p id="followup-note" class="hint" hidden>Follow-ups can read attached files and public links. Use /run for a literal command, or enable Agent mode in Settings for approval-gated tools.</p>
+            <div class="field-heading"><span id="composer-hint" class="hint">Enter to send · Shift+Enter for a new line. Type / for commands or @ for output files.</span><span id="count" class="hint">0 / 4000 characters · Context 16,384 tokens · Output 4,096 tokens</span></div>
+            <details id="preview-details" hidden><summary>Review planned actions</summary><div id="preview" class="notice" role="status" aria-live="polite">Enter a request to see the program's destination checks.</div></details>
+            <button id="run" type="submit" disabled>Send task →</button>
+          </fieldset>
+        </form>
+        <button id="cancel" class="cancel-button" type="button" hidden>Stop generating</button>
+        <section id="tool-approval" class="card" hidden aria-live="polite"><h3>Approve model tool request?</h3><p id="tool-name"></p><details id="tool-details"><summary>View request details</summary><pre id="tool-arguments"></pre></details><p id="always-scope" class="hint"></p><div class="destination-buttons"><button id="approve-tool" type="button">Allow once</button><button id="approve-always" type="button">Always allow this chat</button><button id="deny-tool" class="secondary" type="button">Deny</button></div></section>
+      </section>
+      <aside>
+        <details id="generation" class="card live-panel" hidden>
+          <summary class="section-heading"><h2>Live model output</h2><span id="generation-state" class="live-state">Waiting</span></summary>
+          <p id="generation-phase" class="live-phase" role="status">Waiting for model output</p>
+          <p id="generation-target" class="file-path"></p>
+          <div class="viewer-tabs" role="tablist" aria-label="Output view">
+            <button id="view-code" type="button" role="tab" aria-selected="true" aria-controls="generation-output">Code</button>
+            <button id="view-text" type="button" role="tab" aria-selected="false" aria-controls="generation-output">Text</button>
+          </div>
+          <pre id="generation-output" class="code-view" aria-label="Live generated content" aria-live="off"></pre>
+        </details>
+        <section class="card progress">
+          <div class="section-heading"><span class="step">03</span><h2>Workflow activity</h2><span id="badge" class="badge">Connecting</span></div>
+          <p id="status" role="status" aria-live="polite">Connecting to the local Python server…</p>
+          <p id="error" role="alert" hidden></p>
+          <details id="activity-details"><summary>Logs, saved files &amp; recovery details</summary>
+            <h3>Activity log</h3>
+            <pre id="logs" aria-label="Workflow log">Your workflow log will appear here.</pre>
+            <section id="agent-result" hidden><h3>Agent response</h3><pre id="agent-answer"></pre></section>
+            <div id="output-result" hidden><h3 id="output-title">Workflow output</h3><p id="output-path" class="file-path"></p><ul id="output-files" class="file-list"></ul></div>
+            <div id="result" hidden><h3>Backup saved</h3><p id="backup"></p></div>
+          </details>
+        </section>
+        <details class="help"><summary>Examples and tips</summary><h2>One request, any supported file types</h2><p>You can ask for an entire app in plain language. The project design supplies its filenames and extensions; there is no file-type selector. Java + Spring Boot + React requests use a program-defined mixed-file scaffold.</p><p>Agent mode lets a tool-capable model inspect files, run tests, use a headless browser, and call configured MCP servers. Choose Always allow to approve future tool calls in this conversation.</p><p>Type <strong>/</strong> for reserved commands or <strong>@</strong> to browse workspace files. Paths are relative to the workspace unless absolute.</p><pre>Build a CRUD app using Java, Spring Boot and React.
+
+Improve @"src/app.py" and @"src/utils.py".
+
+/file scripts/hello.py
+Write a script that prints a greeting.
+
+/project my-calculator
+Build a calculator project with a CLI.
+
+/mkdir output/reports
+/run Get-ChildItem</pre><p><strong>/file</strong> creates or edits automatically. <strong>/project</strong> generates up to 20 files. <strong>/mkdir</strong> creates folders. <strong>/run</strong> executes your literal PowerShell command. Recognized command lines such as <strong>wsl --status</strong> also run directly. Prefixes <strong>!</strong> and <strong>#</strong> work for reserved words.</p><p>Windows installation commands may require an elevated application window and a restart. In the default workflow the model never chooses commands; Agent mode permits them only with approval. Command side effects are separate from file rollback.</p><p>Double-click <strong>start.bat</strong> to launch everything next time.</p></details>
+      </aside>
+    </div>
+    <footer>Local workflow. Opt-in agent tools. You control tool approval for each chat.</footer>
+  </main>
+</body>
+</html>

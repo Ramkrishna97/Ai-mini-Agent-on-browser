@@ -1,0 +1,3 @@
+The browser 'agent-ui' is not open, please run open first
+
+  playwright-cli -s=agent-ui open [params]
