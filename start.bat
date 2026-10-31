@@ -22,12 +22,12 @@ py -3 -m venv .venv
 if errorlevel 1 goto failed
 
 :dependencies
-".venv\Scripts\python.exe" -c "import sys, tkinter, ollama, mcp, playwright, pypdf, docx; sys.exit(0 if sys.version_info >= (3, 12) else 1)" >nul 2>nul
+".venv\Scripts\python.exe" -c "import sys, tkinter, ollama, mcp, playwright, pypdf, docx, openvino_genai, huggingface_hub, jsonschema; sys.exit(0 if sys.version_info >= (3, 12) else 1)" >nul 2>nul
 if not errorlevel 1 goto launch
 echo Preparing Python dependencies. First launch may take a minute...
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 goto failed
-".venv\Scripts\python.exe" -c "import sys, tkinter, ollama, mcp, playwright, pypdf, docx; sys.exit(0 if sys.version_info >= (3, 12) else 1)"
+".venv\Scripts\python.exe" -c "import sys, tkinter, ollama, mcp, playwright, pypdf, docx, openvino_genai, huggingface_hub, jsonschema; sys.exit(0 if sys.version_info >= (3, 12) else 1)"
 if errorlevel 1 goto failed
 
 :launch
