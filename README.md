@@ -1,25 +1,56 @@
-# Local file automation with Ollama or GGUF
+# Local file automation with Ollama, GGUF, or Intel NPU
 
-A Windows-friendly Python CLI and browser UI that use either local Ollama or a
-GGUF model loaded directly through llama.cpp.
-Python owns every path, backup, validation, retry, and write decision. The model receives
-one system message and a bounded task/source message per call, without history, tools,
-or an autonomous agent loop in the default workflow. Agent mode is a separate,
-opt-in tool loop; it can execute code after you approve a request or choose
-**Always allow this chat**.
+A Windows-friendly Python CLI and browser UI that use local Ollama, a
+GGUF model loaded directly through llama.cpp, or an Intel NPU through OpenVINO.
+The browser starts in Agent mode. A tool-capable model can inspect and change the
+selected workspace and run local commands after you approve each request or choose
+**Always allow this chat**. Uncheck Agent mode to use the older fixed workflow.
+Agent mode uses LangGraph to advance bounded model-and-tool turns and LangChain
+Core's runnable adapter to call the selected local model. The existing
+approval gate remains in front of every workspace, browser, and MCP tool.
+The activity panel shows concise progress and streamed model text, not private
+chain-of-thought. Model responses can include user-facing action summaries.
+
+Workspace skills live in `.agent/skills/<name>/SKILL.md`. The agent sees a
+bounded catalog of names and descriptions and can use `load_skill` to read a
+relevant skill on demand. Skills are guidance only; they cannot approve tools
+or execute code. See `.agent/skills/verify-project/SKILL.md` for an example.
 
 The browser UI uses one continuous chat column with the composer below the
 conversation, plus a Code/Text viewer and activity log in the same flow. Both
-Ollama and local GGUF Agent replies stream as they are generated.
+Ollama, local GGUF, and Intel NPU Agent replies stream as they are generated.
+
+For new web projects, Agent mode exposes `create_project_structure` (up to 100
+new files), context-checked unified diffs through `apply_file_patch`, and
+`start_dev_server` / `wait_for_port` / `stop_dev_server`. Enable the headless
+browser option to expose `browser_navigate`, `browser_capture_snapshot`,
+`browser_get_console_logs`, and `browser_interact`. The browser accepts only
+localhost URLs. Snapshots include a Base64 PNG and bounded DOM data; Ollama
+vision models receive the PNG as an image in the tool result. Managed servers
+are stopped when the Agent turn ends, even if it fails. The agent selects checks
+relevant to the request. If it starts a server, it verifies the port and (when
+the browser is enabled) captures a page snapshot and checks console errors.
+It allows at most three repair cycles for observed failures.
+The **Workspace files** panel refreshes while open, lets you browse folders,
+and previews UTF-8 files up to 128 KB as the agent works.
+In Agent mode, the live panel shows streamed model text, tool approvals and
+results, command output, and previews of code sent to file tools. It keeps the
+saved-file links visible after completion so generated files can be opened
+from the chat. The final response lists file changes and command exit codes
+confirmed by tool results.
+The browser uses the loopback HTTP API to reach the Python agent daemon. Its
+bounded tool loop sends approved shell commands through the local command runner;
+Node/npm, Python/pip, Java, Maven, and Gradle work when they are installed on
+the machine's PATH. Command results and parsed failures return to the model as
+tool messages so it can edit and rerun a focused check.
 
 The request area is a conversation: after a model-backed workflow completes,
 type a follow-up question and press Enter (Shift+Enter inserts a new line).
 Follow-up answers stream into the chat and use the original result, generated
 files, attached read-only references, public URLs, and recent conversation as
-context. Ordinary follow-up questions are read-only. To run a literal command in
+context. With Agent mode enabled, follow-ups can also use tools. To run a literal command in
 the same conversation, send `/run your-command`; the app shows its real exit code
-and output. For model-selected actions, enable **Agent mode** in Settings: each
-tool calls ask for approval until you choose **Always allow this chat**. A fenced `tool_code` block in model text
+and output. Each model tool call asks for approval until you choose **Always allow this chat**. A fenced `tool_code` block in model text
 is not a tool call and is never executed. The selected model stays loaded for follow-ups
 until a new task begins. The conversation survives a browser refresh while the
 local app process remains open.
@@ -28,6 +59,28 @@ Choosing an Ollama model in **Workspace & model** preloads it immediately, so
 the first prompt does not wait for the model to enter memory. Choosing another
 Ollama model offloads the previous one first. **Offload loaded model** releases
 the selected model without starting a new task; select it again to preload it.
+
+### Intel NPU model source
+
+Ollama is the default model source for new conversations. Choose
+**Intel NPU (OpenVINO, optional)** and then explicitly select a model to use a
+locally downloaded OpenVINO model on a
+detected Intel NPU. The app discovers complete models in `.runtime/npu-models/`
+and lets you select any of them. Enter a compatible Hugging Face OpenVINO model
+ID and click **Download** to add another without changing code. Automatic
+downloads are capped at 1.5 GB; model size is only a download policy, not a
+guarantee of NPU compatibility. Compiled files are cached in `.runtime/npu-cache/`.
+The first model load can take several minutes. The app checks for an NPU and
+reports an error if OpenVINO cannot see one; it does not silently run this option
+on the CPU. The NPU option uses a 4096-token prompt window and up to 1024 output
+tokens. Generation can also be slow on this NPU. Small models may handle
+complex tasks less reliably than larger Ollama models, but can use the same
+approval-gated workspace tools in Agent mode.
+The NPU path uses greedy generation, so the Temperature control is disabled.
+An up-to-date Intel NPU driver and internet access for each new model download
+are required. Ollama and GGUF models do not automatically become NPU-compatible
+because their files are under 1.5 GB. The installed GGUF models tested here
+failed NPU loading with the current OpenVINO runtimes. See [OpenVINO's NPU guide](https://docs.openvino.ai/2026/openvino-workflow-generative/inference-with-genai/inference-with-genai-on-npu.html).
 
 Use **Add reference files** to select up to eight existing, read-only files as
 model context. Text/code files must be UTF-8; PDF and DOCX text is extracted.
@@ -39,25 +92,48 @@ project folder for mixed-type output (up to 20 files).
 
 ## Agent mode (browser UI)
 
-Double-click [start.bat](./start.bat), select a workspace folder and a tool-capable
-Ollama or GGUF model, then check **Agent mode**. Describe the task normally
+Double-click [start.bat](./start.bat), select a workspace folder and a model source.
+Agent mode is checked by default. Describe the task normally
 (for example, "inspect this project, fix the failing test, and run it"). The model
-may request `list_files`, `read_file`, `write_file`, `run_command`, and
+may request `list_directory`, `search_text`, `read_file`, `write_file`, `replace_text`,
+`create_project_structure`, `apply_file_patch`, `make_directory`, `move_path`,
+`delete_path`, `run_command`, server controls, browser inspection tools, and
 `web_fetch` for public pages or GitHub repository README/metadata. The UI shows
 the tool name and lets you expand its arguments before choosing **Allow once**,
 **Always allow this chat**, or **Deny**. Always allow covers every later tool call
 in this conversation, including files, commands, browser access, and enabled MCP
 tools. The choice is saved with this conversation; new conversations ask again.
-Files may be absolute or relative to the selected workspace; review absolute
-paths before approval. File writes are limited to 64 KB and back up existing files.
+File reads and writes may use absolute paths after approval; the directory, move,
+delete, search, and exact-edit tools stay inside the selected workspace. Review
+command text before approval: commands run with your local OS permissions and are
+not isolated in a sandbox. File writes are limited to 64 KB and back up existing
+files. Exact edits support UTF-8 files up to 1 MB. Deleted files get a `.bak`
+copy; recursive directory deletion does not create a backup.
 Public URLs explicitly included in an Agent request are also read as task context,
 so a small model can summarize a linked repository even if it does not make a
 tool call. Local/private URLs are blocked. Follow-up questions can likewise
 read public links included in the question or referenced from the original task.
-Commands run from the selected workspace in PowerShell on Windows, with a 120-second
-limit. Cancelling stops the agent between calls or during a command. The tool loop
-stops after 20 calls; start a new request to continue. Command output and the
+Commands run from the selected workspace by default in PowerShell on Windows. Commands
+using `&&` or `||` run through CMD on Windows so common build chains work with Windows
+PowerShell 5.1. Every command has a hard 60-second
+limit. The runner captures stdout and stderr separately, keeps a combined output for the activity panel,
+and stops the command process tree on timeout or cancellation. Captured output is limited to 4 MB.
+Incomplete model tool markup is retried twice and then reported as an error instead of
+appearing as a completed answer.
+Failed commands also return a short diagnostic summary with recognized test failures,
+exceptions, and compiler errors so the agent can correct the cause. After three
+failures of the same command without a successful edit or command, a circuit breaker
+blocks further retries; the agent stops if it keeps requesting the blocked command.
+Cancelling stops the agent between calls or during a command. The tool loop
+stops after 100 calls; send a follow-up request to continue. Command output and the
 model's final answer are displayed in the activity panel.
+
+The core agent tools are defined in [core_tool_manifest.json](./core_tool_manifest.json).
+It contains JSON input schemas for `read_file(path)`, `write_file(path, content)`,
+`run_command(command, cwd)`, and `list_directory(path)`. The same definitions are
+sent to the model and enforced before a tool runs. `cwd` is optional and defaults
+to the selected workspace; when supplied, it must name an existing directory.
+`list_files` remains available as an older alias for `list_directory`.
 
 The optional browser tool controls a headless Chromium page (`navigate`, `snapshot`,
 `click`, `type`). Install its browser binary once after installing dependencies:
@@ -74,11 +150,30 @@ corresponding runtimes (`python`, `node`/`npm`, and `javac`/`java`) and Chromium
 before using those tools. To add external MCP plugins, copy
 [mcp_servers.example.json](./mcp_servers.example.json) to `mcp_servers.json` and
 replace the example command with your MCP stdio server's command, arguments and
-optional environment. Configured servers start alongside the built-in search;
+optional environment. For a separately running local MCP server, use a
+`url` entry such as `http://127.0.0.1:3001/mcp`; only explicit HTTP loopback
+endpoints are accepted. To expose this app's MCP server on that endpoint,
+start it in the selected workspace with:
+
+```powershell
+python path/to/ai-agent-mini/local_mcp_server.py --http --port 3001
+```
+
+Add this entry under `mcpServers` in `mcp_servers.json`:
+
+```json
+"local_http": {"url": "http://127.0.0.1:3001/mcp"}
+```
+
+The HTTP server is started explicitly, binds only to `127.0.0.1`, and exposes
+only read-only search and public URL fetch tools. The app's built-in stdio
+MCP server still provides the full tool set behind Agent mode approval.
+Enable MCP tools in Agent mode to connect to it. Configured stdio servers
+start alongside the built-in search; configured HTTP servers are connected;
 MCP tool calls use the conversation's approval setting. MCP servers run as local programs,
 so configure only ones you trust. Keep credentials in local environment values and
 do not commit `mcp_servers.json` if it contains secrets. The browser and MCP options
-are off by default. The original deterministic workflow remains the default.
+are off by default. Agent mode is the default; uncheck it to use the deterministic workflow.
 
 ## Directory structure
 
