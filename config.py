@@ -37,8 +37,8 @@ class Settings:
     keep_alive: str | int = "10m"
 
     def __post_init__(self) -> None:
-        if self.provider not in {"ollama", "gguf"}:
-            raise ValueError("Model provider must be ollama or gguf.")
+        if self.provider not in {"ollama", "gguf", "npu"}:
+            raise ValueError("Model provider must be ollama, gguf, or npu.")
         if self.provider == "ollama":
             url = urlparse(self.endpoint)
             if url.scheme not in {"http", "https"} or not url.hostname:
@@ -52,8 +52,9 @@ class Settings:
         for name in ("max_tokens", "context_tokens", "chunk_chars", "max_file_bytes", "max_chunks"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive.")
-        # Conservative character budget, including bounded instruction and prompts.
-        if self.chunk_chars + self.max_tokens + 6000 > self.context_tokens:
+        # The NPU model uses a smaller fixed prompt window than Ollama/GGUF.
+        reserve = 2000 if self.provider == "npu" else 6000
+        if self.chunk_chars + self.max_tokens + reserve > self.context_tokens:
             raise ValueError("Context budget too small: increase input context or reduce output tokens.")
 
 
@@ -233,8 +234,11 @@ class OllamaEngine:
 
 
 def create_engine(settings: Settings, *, progress=None):
-    """Select an Ollama or direct local-GGUF runtime for the same workflow."""
+    """Select an Ollama, local-GGUF, or Intel NPU runtime."""
     if settings.provider == "gguf":
         from gguf_engine import GgufEngine
         return GgufEngine(settings, progress=progress)
+    if settings.provider == "npu":
+        from npu_engine import NpuEngine
+        return NpuEngine(settings, progress=progress)
     return OllamaEngine(settings, progress=progress)
