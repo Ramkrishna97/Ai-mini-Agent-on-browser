@@ -6,6 +6,7 @@ Only explicitly routed UI assets are served; source files and backups are never 
 
 import argparse
 import asyncio
+import contextvars
 from dataclasses import asdict, replace
 import json
 import logging
@@ -27,6 +28,7 @@ import webbrowser
 from config import ModelError, OllamaEngine, Settings, WorkflowCancelled, create_engine
 from command_runner import run_command
 from gguf_engine import validate_gguf
+from npu_engine import import_npu_model, list_npu_models, validate_npu_model
 from agent import run_agent
 from context_files import read_context, validate_context_paths
 from error_details import describe_error
@@ -35,8 +37,12 @@ from request_parser import plan_request
 from workflow import run_workflow
 from suggestions import suggestions
 from web_access import fetch_public_url, urls_in_text
+from workspace_view import list_workspace, read_workspace_file
 
 ROOT = Path(__file__).resolve().parent
+WORKFLOW_LOG_OWNER = contextvars.ContextVar("workflow_log_owner", default=None)
+LOG_ENTRY_LIMIT = 2000
+LOG_HISTORY_LIMIT = 300
 
 
 def ollama_model_location_hint():
@@ -69,7 +75,7 @@ class JobState:
         self.cancel_event = threading.Event()
         self.approval_event = threading.Event()
         self.approval_decision = False
-        self.data = {"status": "idle", "logs": [], "backup": "", "backups": [], "files": [],
+        self.data = {"status": "idle", "logs": [], "backup": "", "backups": [], "files": [], "agent_steps": [],
                      "commands": [], "error": "", "path": "", "mode": "auto", "generation": {},
                      "pending_tool": None, "always_allow_all": False, "answer": "", "conversation": [], "chat_ready": False}
         self.chat_settings = None
@@ -101,7 +107,7 @@ class JobState:
 
     def snapshot(self):
         with self.lock:
-            return {**self.data, "logs": list(self.data["logs"]),
+            return {**self.data, "logs": list(self.data["logs"]), "agent_steps": list(self.data.get("agent_steps", [])),
                     "generation": dict(self.data.get("generation", {})),
                     "conversation": [dict(item) for item in self.data.get("conversation", [])]}
 
@@ -115,9 +121,18 @@ class JobState:
             generation = self.data.setdefault("generation", {})
             delta = event.get("delta", "")
             generation.update({key: value for key, value in event.items() if key != "delta"})
+            generation.pop("step", None)
+            if isinstance(event.get("step"), dict):
+                steps = self.data.setdefault("agent_steps", [])
+                steps.append(event["step"])
+                self.data["agent_steps"] = steps[-80:]
+                files = self.data.setdefault("files", [])
+                for path in event["step"].get("files", []):
+                    if path not in files:
+                        files.append(path)
             if delta:
                 generation["text"] = (generation.get("text", "") + delta)[-131072:]
-                if self.data.get("mode") in {"chat", "agent"} and self.data.get("conversation"):
+                if self.data.get("mode") == "chat" and self.data.get("conversation"):
                     assistant = self.data["conversation"][-1]
                     assistant["text"] = (assistant["text"] + delta)[-32768:]
 
@@ -171,7 +186,7 @@ class JobState:
             self.approval_event.clear()
             self.chat_settings = settings
             self.completed_context = None
-            self.data = {"status": "running", "logs": [], "backup": "", "backups": [], "files": [],
+            self.data = {"status": "running", "logs": [], "backup": "", "backups": [], "files": [], "agent_steps": [],
                          "commands": [], "error": "", "path": path, "mode": "agent" if agent_mode else plan.action, "generation": {},
                          "pending_tool": None, "always_allow_all": self.data.get("always_allow_all", False), "answer": "",
                          "request": instruction, "model": settings.model_name if settings else "",
@@ -203,16 +218,16 @@ class JobState:
 
     def run(self, path, instruction, settings, name, agent_mode, browser, mcp, attachments):
         state = self
-        worker_id = threading.get_ident()
+        log_token = WORKFLOW_LOG_OWNER.set(state)
 
         class JobLog(logging.Handler):
             def emit(self, record):
-                if record.thread != worker_id:
+                if WORKFLOW_LOG_OWNER.get() is not state:
                     return
-                message = self.format(record)
+                message = self.format(record)[:LOG_ENTRY_LIMIT]
                 with state.lock:
                     state.data["logs"].append(message)
-                    state.data["logs"] = state.data["logs"][-500:]
+                    state.data["logs"] = state.data["logs"][-LOG_HISTORY_LIMIT:]
 
         handler = JobLog()
         handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)s  %(message)s", "%H:%M:%S"))
@@ -285,6 +300,7 @@ class JobState:
                 except Exception as exc:
                     logger.warning("Model cleanup failed: %s", describe_error(exc))
             logger.removeHandler(handler)
+            WORKFLOW_LOG_OWNER.reset(log_token)
             try:
                 self.persist()
             finally:
@@ -311,7 +327,7 @@ class JobState:
             history = [dict(item) for item in self.data["conversation"][-16:]]
             self.cancel_event.clear()
             self.worker_active = True
-            self.data.update(status="running", mode="command" if commands else "agent" if agent_mode else "chat", generation={}, error="", answer="", logs=[],
+            self.data.update(status="running", mode="command" if commands else "agent" if agent_mode else "chat", generation={}, error="", answer="", logs=[], agent_steps=[],
                              chat_ready=False, pending_tool=None)
             self.data["conversation"] = history + [{"role": "user", "text": question.strip()},
                                                     {"role": "assistant", "text": "", "state": "working"}]
@@ -335,14 +351,14 @@ class JobState:
                  agent_mode=False, browser=False, mcp=False):
         engine = self.active_engine if commands else None
         command_logger = logging.getLogger("workflow")
-        command_thread = threading.get_ident()
+        log_token = WORKFLOW_LOG_OWNER.set(self)
 
         class CommandLog(logging.Handler):
             def emit(self, record):
-                if record.thread == command_thread:
+                if WORKFLOW_LOG_OWNER.get() is self_state:
                     with self_state.lock:
-                        self_state.data["logs"].append(self.format(record))
-                        self_state.data["logs"] = self_state.data["logs"][-500:]
+                        self_state.data["logs"].append(self.format(record)[:LOG_ENTRY_LIMIT])
+                        self_state.data["logs"] = self_state.data["logs"][-LOG_HISTORY_LIMIT:]
 
         self_state = self
         handler = CommandLog() if commands or agent_mode else None
@@ -463,6 +479,7 @@ class JobState:
         finally:
             if handler:
                 command_logger.removeHandler(handler)
+            WORKFLOW_LOG_OWNER.reset(log_token)
             with self.lock:
                 self.data["chat_ready"] = True
                 if self.data["status"] == "succeeded":
@@ -717,7 +734,7 @@ class Handler(BaseHTTPRequestHandler):
                 requested = parse_qs(route.query).get("id", [""])[0]
                 session_id = requested or self.server.sessions.create()
                 self.server.sessions.get(session_id)
-                self.respond(200, {"token": self.server.token, "application": "local-workflow", "version": 12,
+                self.respond(200, {"token": self.server.token, "application": "local-workflow", "version": 16,
                                    "id": session_id, "workspace": str(ROOT), "default_name": "generated-project"})
             except (ValueError, OSError) as exc:
                 self.respond(404, {"error": str(exc)})
@@ -738,13 +755,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "diagnostic": ollama_model_location_hint() if not models else ""})
             except (ModelError, RuntimeError) as exc:
                 self.respond(503, {"error": str(exc)})
+        elif route.path == "/api/npu/models":
+            self.respond(200, {"models": list_npu_models()})
         else:
             self.respond(404, {"error": "Not found."})
 
     def do_POST(self):
         if not self.local_request():
             return
-        if self.path not in {"/api/run", "/api/chat", "/api/choose-file", "/api/preview", "/api/suggestions", "/api/cancel", "/api/output", "/api/approve", "/api/model/load", "/api/model/offload", "/api/sessions", "/api/sessions/delete"}:
+        if self.path not in {"/api/run", "/api/chat", "/api/choose-file", "/api/preview", "/api/suggestions", "/api/cancel", "/api/output", "/api/approve", "/api/model/load", "/api/model/offload", "/api/npu/import", "/api/sessions", "/api/sessions/delete", "/api/workspace/list", "/api/workspace/read"}:
             self.respond(404, {"error": "Not found."})
             return
         if not secrets.compare_digest(self.headers.get("X-Workflow-Token", ""), self.server.token):
@@ -761,12 +780,23 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("Expected a JSON object.")
+            if self.path == "/api/npu/import":
+                self.respond(200, {"model": import_npu_model(payload.get("repo_id"))})
+                return
             if self.path == "/api/sessions":
                 self.respond(201, {"id": self.server.sessions.create()})
                 return
             if self.path == "/api/sessions/delete":
                 self.server.sessions.delete(payload.get("id"))
                 self.respond(200, {"deleted": True})
+                return
+            if self.path == "/api/workspace/list":
+                self.server.sessions.get(self.headers.get("X-Session-Id", ""))
+                self.respond(200, list_workspace(payload.get("root"), payload.get("relative", "")))
+                return
+            if self.path == "/api/workspace/read":
+                self.server.sessions.get(self.headers.get("X-Session-Id", ""))
+                self.respond(200, read_workspace_file(payload.get("root"), payload.get("relative")))
                 return
             job = self.server.sessions.get(self.headers.get("X-Session-Id", ""))
             if self.path in {"/api/model/load", "/api/model/offload"}:
@@ -830,8 +860,8 @@ class Handler(BaseHTTPRequestHandler):
             model = payload.get("model", "")
             provider = payload.get("provider", "ollama")
             gguf_path = payload.get("gguf_path", "")
-            if provider not in {"ollama", "gguf"}:
-                raise ValueError("Choose Ollama or Local GGUF.")
+            if provider not in {"ollama", "gguf", "npu"}:
+                raise ValueError("Choose Ollama, Local GGUF, or Intel NPU.")
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise ValueError("Choose a workspace folder or file location.")
             if not isinstance(name, str):
@@ -858,20 +888,25 @@ class Handler(BaseHTTPRequestHandler):
             if preview["needs_model"]:
                 if provider == "gguf":
                     model = str(validate_gguf(gguf_path))
+                elif provider == "npu":
+                    model = str(validate_npu_model(model))
                 elif not isinstance(model, str) or not model.strip() or len(model) > 200:
                     raise ValueError("Choose an installed Ollama model from the dropdown.")
                 elif model.endswith((":cloud", "-cloud")):
                     raise ValueError("Choose a locally installed generation model.")
             settings = None
             if preview["needs_model"]:
-                max_tokens = int(payload.get("max_tokens", 4096))
-                if not 128 <= max_tokens <= 16384:
-                    raise ValueError("Output tokens must be between 128 and 16384.")
-                context_tokens = int(payload.get("context_tokens", 16384))
-                if not 8192 <= context_tokens <= 262144:
+                max_tokens = int(payload.get("max_tokens", 512 if provider == "npu" else 4096))
+                if not 128 <= max_tokens <= (1024 if provider == "npu" else 16384):
+                    raise ValueError("Output tokens are outside the selected runtime's range.")
+                context_tokens = int(payload.get("context_tokens", 4096 if provider == "npu" else 16384))
+                if provider == "npu" and context_tokens != 4096:
+                    raise ValueError("Intel NPU uses a 4096-token prompt window.")
+                if provider != "npu" and not 8192 <= context_tokens <= 262144:
                     raise ValueError("Input context must be between 8192 and 262144 tokens.")
                 settings = Settings(provider=provider, model_name=model, temperature=float(payload.get("temperature", 0.2)),
                                     max_tokens=max_tokens, context_tokens=context_tokens,
+                                    chunk_chars=1000 if provider == "npu" else 6000,
                                     keep_alive=-1 if provider == "ollama" else "10m")
             if settings and provider == "ollama" and self.server.preloader.snapshot()["busy"]:
                 self.respond(409, {"error": "Wait for the selected Ollama model to finish loading."})
@@ -885,7 +920,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(409, {"error": "A workflow is already running. Wait for it to finish."})
                 return
             self.respond(202, {"status": "running"})
-        except (ValueError, TypeError, OverflowError, FileSafetyError, OSError) as exc:
+        except (ValueError, TypeError, OverflowError, FileSafetyError, ModelError, OSError) as exc:
             self.respond(400, {"error": str(exc)})
 
     def choose_file(self, kind):
@@ -973,7 +1008,7 @@ def main():
             with urlopen(f"http://127.0.0.1:{args.port}/api/session", timeout=2) as response:
                 previous = json.load(response)
             if previous.get("application") == "local-workflow":
-                if previous.get("version") != 12:
+                if previous.get("version") != 16:
                     parser.exit(1, "An older Local Workflow server is still running. Run stop.bat, then start.bat.\n")
                 if not args.no_browser:
                     webbrowser.open(f"http://127.0.0.1:{args.port}")
