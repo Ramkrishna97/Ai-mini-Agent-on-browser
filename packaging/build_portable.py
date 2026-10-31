@@ -43,7 +43,8 @@ def main():
     app.mkdir()
     for path in root.glob("*.py"):
         shutil.copy2(path, app / path.name)
-    for name in ("index.html", "ui.js", "ui.css", "requirements.txt", "mcp_servers.example.json"):
+    for name in ("index.html", "ui.js", "ui.css", "requirements.txt", "mcp_servers.example.json",
+                 "core_tool_manifest.json"):
         shutil.copy2(root / name, app / name)
     shutil.copy2(root / "stop.bat", output / "stop.bat")
     shutil.copy2(root / "packaging" / "README.md", output / "README.md")
