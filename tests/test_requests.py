@@ -148,6 +148,50 @@ class RequestTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             run_command('Start-Sleep -Seconds 30', self.root, timeout=0.2)
 
+    def test_command_captures_both_streams(self):
+        if os.name != "nt":
+            self.skipTest("Windows PowerShell stream regression")
+        from command_runner import run_command
+        result = run_command('[Console]::Out.WriteLine("hello"); [Console]::Error.WriteLine("problem")', self.root)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertIn("hello", result["stdout"])
+        self.assertIn("problem", result["stderr"])
+        self.assertIn("hello", result["output"])
+        self.assertIn("problem", result["output"])
+        self.assertEqual(result["diagnostics"]["status"], "success")
+
+    def test_failed_command_returns_structured_diagnostics(self):
+        if os.name != "nt":
+            self.skipTest("Windows PowerShell stream regression")
+        from command_runner import run_command
+        result = run_command('[Console]::Error.WriteLine("SyntaxError: invalid syntax"); exit 2', self.root)
+        self.assertEqual(result["exit_code"], 2)
+        self.assertEqual(result["diagnostics"]["status"], "failed")
+        self.assertEqual(result["diagnostics"]["errors"][0]["kind"], "exception")
+
+    def test_cmd_style_chain_uses_compatible_windows_shell(self):
+        if os.name != "nt":
+            self.skipTest("Windows CMD chain regression")
+        from command_runner import run_command, uses_cmd_chain
+        self.assertFalse(uses_cmd_chain('Write-Output "a && b"'))
+        self.assertTrue(uses_cmd_chain('echo first && echo second'))
+        result = run_command('echo first && echo second', self.root)
+        self.assertEqual(result["shell"], "cmd")
+        self.assertEqual(result["exit_code"], 0, result["output"])
+        self.assertIn("first", result["output"])
+        self.assertIn("second", result["output"])
+
+    def test_command_timeout_cannot_exceed_hard_limit(self):
+        from command_runner import COMMAND_TIMEOUT_SECONDS, run_command
+        self.assertEqual(COMMAND_TIMEOUT_SECONDS, 60)
+        with self.assertRaises(ValueError):
+            run_command("echo hello", self.root, timeout=0)
+        with self.assertRaises(ValueError):
+            run_command("echo hello", self.root, timeout=float("inf"))
+        if os.name == "nt":
+            with patch("command_runner.COMMAND_TIMEOUT_SECONDS", 0.2), self.assertRaises(TimeoutError):
+                run_command('Start-Sleep -Seconds 3', self.root, timeout=120)
+
 
 if __name__ == "__main__":
     unittest.main()
