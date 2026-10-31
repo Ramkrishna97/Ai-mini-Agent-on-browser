@@ -47,6 +47,8 @@ function makePanel(id, title, content) {
 const settingsPanel = makePanel('settings-panel', 'Workspace & model', configControls);
 const activityDialog = makePanel('activity-panel', 'Activity & files', $('.progress'));
 const helpPanel = makePanel('help-panel', 'Help & commands', $('.help'));
+const workspaceContent = document.createElement('div');
+const workspacePanel = makePanel('workspace-panel', 'Workspace files', workspaceContent);
 activityPanel.remove();
 $('#workflow-config').open = true;
 $('#activity-details').open = true;
@@ -60,8 +62,10 @@ chatForm.addEventListener('invalid', event => {
   }
 }, true);
 document.querySelectorAll('[data-panel]').forEach(button => button.addEventListener('click', () => {
-  const panel = {settings: settingsPanel, activity: activityDialog, help: helpPanel}[button.dataset.panel];
+  const panel = {settings: settingsPanel, activity: activityDialog, help: helpPanel,
+    workspace: workspacePanel}[button.dataset.panel];
   if (!panel.open) panel.showModal();
+  if (panel === workspacePanel) refreshWorkspace(true);
 }));
 $('#toggle-sidebar').addEventListener('click', () => {
   const hidden = document.body.classList.toggle('sidebar-hidden');
@@ -75,7 +79,12 @@ const instruction = $('#instruction');
 const pathInput = $('#path');
 const nameInput = $('#name');
 const modelSelect = $('#model');
+const npuModelSelect = $('#npu-model');
+let npuModelsLoaded = false, loadingNpuModels = false;
+$('#name').disabled = $('#agent-mode').checked;
 const providerSelect = $('#provider');
+let lastProvider = providerSelect.value;
+let nonNpuContextTokens = 16384, nonNpuMaxTokens = 4096;
 const ggufPath = $('#gguf-path');
 let token = '', connected = false, running = false, submitting = false;
 let pendingPrompt = '';
@@ -90,6 +99,7 @@ let pendingToolId = '';
 let viewerPreference = null, viewerTarget = '', displayedText = '', displayedMode = '';
 let attachments = [];
 let followupMode = false, newTaskDraft = false, chatReady = false;
+let conversationModel = '';
 let hasConversation = false;
 let restoredSession = false, preferredModel = '';
 let generationWasRunning = false;
@@ -187,7 +197,10 @@ function showErrors() {
 }
 
 function updateConfigSummary() {
-  const model = providerSelect.value === 'gguf' ? ggufPath.value.split(/[\\/]/).pop() : modelSelect.value;
+  const selectedModel = providerSelect.value === 'npu' ? (npuModelSelect.selectedOptions[0]?.textContent || 'Choose NPU model') :
+    providerSelect.value === 'gguf' ? ggufPath.value.split(/[\\/]/).pop() : modelSelect.value;
+  const model = hasConversation && !newTaskDraft && conversationModel ?
+    conversationModel.split(/[\\/]/).pop() : selectedModel;
   const workspace = pathInput.value.split(/[\\/]/).filter(Boolean).pop();
   const parts = [model || (providerSelect.value === 'gguf' ? 'Choose GGUF' : 'Choose model')];
   if (workspace) parts.push(workspace);
@@ -202,9 +215,10 @@ function updateControls() {
   controls.disabled = !connected || running || submitting || choosing;
   configControls.disabled = !connected || running || submitting || choosing;
   const ollama = providerSelect.value === 'ollama';
+  const npu = providerSelect.value === 'npu';
   modelSelect.required = Boolean(!followupMode && ollama && preview && preview.needs_model);
   $('#run').disabled = !instruction.value.trim() || (!followupMode && (!preview || (preview.needs_model &&
-    (ollama ? (!modelSelect.value || loadingModels || modelLoading) : !ggufPath.value))));
+    (ollama ? (!modelSelect.value || loadingModels || modelLoading) : npu ? (!npuModelSelect.value || loadingNpuModels) : !ggufPath.value))));
   $('#refresh-models').disabled = loadingModels;
   $('#offload-model').disabled = !connected || running || submitting || choosing || (!modelSelect.value && !modelResidency.loaded && !modelResidency.busy);
   $('#cancel').hidden = !(running || submitting);
@@ -212,7 +226,7 @@ function updateControls() {
   $('#sidebar-new').disabled = !connected;
   $('#run').title = followupMode ? 'Send follow-up' : 'Send task';
   $('#run').setAttribute('aria-label', $('#run').title);
-  $('#header-model').classList.toggle('needs-model', Boolean(!followupMode && preview?.needs_model && !(ollama ? modelSelect.value : ggufPath.value)));
+  $('#header-model').classList.toggle('needs-model', Boolean(!followupMode && preview?.needs_model && !(ollama ? modelSelect.value : npu ? npuModelSelect.value : ggufPath.value)));
   if (!running) {
     $('#top-status').textContent = modelLoading ? 'Loading model…' : modelResidency.phase === 'error' ? 'Model error' : $('#badge').textContent;
     $('#top-status').dataset.state = modelLoading ? 'running' : modelResidency.phase === 'error' ? 'failed' : $('#badge').dataset.state;
@@ -235,9 +249,84 @@ function post(url, payload) {
   }, body: JSON.stringify(payload)});
 }
 
+let workspaceRoot = '', workspaceRelative = '', workspaceSignature = '';
+let workspaceLastRefresh = 0, workspaceLoading = false;
+const workspaceToolbar = document.createElement('div');
+workspaceToolbar.className = 'workspace-toolbar';
+const workspaceBack = document.createElement('button');
+workspaceBack.type = 'button'; workspaceBack.textContent = 'Up';
+const workspaceLocation = document.createElement('span');
+workspaceLocation.className = 'file-path';
+workspaceToolbar.append(workspaceBack, workspaceLocation);
+const workspaceStatus = document.createElement('p');
+workspaceStatus.className = 'hint';
+const workspaceEntries = document.createElement('div');
+workspaceEntries.className = 'workspace-entries';
+workspaceContent.append(workspaceToolbar, workspaceStatus, workspaceEntries);
+workspaceBack.addEventListener('click', () => {
+  workspaceRelative = workspaceRelative.split('/').slice(0, -1).join('/');
+  refreshWorkspace(true);
+});
+
+async function refreshWorkspace(force = false) {
+  if (!workspacePanel.open || !token || workspaceLoading ||
+      (!force && Date.now() - workspaceLastRefresh < 1500)) return;
+  const selected = pathInput.value;
+  if (selected !== workspaceRoot) {
+    workspaceRoot = selected;
+    workspaceRelative = '';
+    workspaceSignature = '';
+  }
+  workspaceLoading = true;
+  workspaceLastRefresh = Date.now();
+  try {
+    const data = await post('/api/workspace/list', {root: workspaceRoot, relative: workspaceRelative});
+    if (selected !== pathInput.value) return;
+    workspaceRelative = data.relative;
+    workspaceLocation.textContent = data.relative ? `${data.root} / ${data.relative}` : data.root;
+    workspaceBack.disabled = !data.relative;
+    workspaceStatus.textContent = `${data.entries.length} entries${data.truncated ? ' (first 200 shown)' : ''} · Updates while this panel is open`;
+    const signature = JSON.stringify([data.relative, data.entries]);
+    if (signature !== workspaceSignature) {
+      workspaceSignature = signature;
+      workspaceEntries.replaceChildren(...data.entries.map(entry => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'workspace-entry';
+        button.textContent = `${entry.type === 'directory' ? '▸' : '▤'}  ${entry.name}`;
+        button.title = entry.path;
+        button.addEventListener('click', async () => {
+          if (entry.type === 'directory') {
+            workspaceRelative = entry.path;
+            refreshWorkspace(true);
+            return;
+          }
+          try {
+            const file = await post('/api/workspace/read', {root: workspaceRoot, relative: entry.path});
+            inspectingOutput = true;
+            workspacePanel.close();
+            $('#generation').hidden = false;
+            $('#generation').open = true;
+            $('#generation-phase').textContent = 'Workspace file preview';
+            $('#generation-target').textContent = file.path;
+            $('#generation-state').dataset.state = 'complete';
+            $('#generation-state').textContent = 'Preview';
+            viewerTarget = file.path;
+            viewerPreference = null;
+            showOutput(file.text, file.path);
+          } catch (error) { workspaceStatus.textContent = error.message; }
+        });
+        return button;
+      }));
+    }
+  } catch (error) {
+    workspaceStatus.textContent = error.message;
+  } finally { workspaceLoading = false; }
+}
+
 function payload() {
   return {path: pathInput.value, name: $('#agent-mode').checked ? '' : nameInput.value.trim(), instruction: instruction.value.trim(),
-    provider: providerSelect.value, model: modelSelect.value, gguf_path: ggufPath.value,
+    provider: providerSelect.value, model: providerSelect.value === 'npu' ? npuModelSelect.value : modelSelect.value, gguf_path: ggufPath.value,
     temperature: Number($('#temperature').value),
     context_tokens: Number($('#context_tokens').value), max_tokens: Number($('#max_tokens').value), agent_mode: $('#agent-mode').checked,
     browser: $('#browser-enabled').checked, mcp: $('#mcp-enabled').checked, attachments};
@@ -245,9 +334,32 @@ function payload() {
 
 providerSelect.addEventListener('change', () => {
   const ollama = providerSelect.value === 'ollama';
+  const npu = providerSelect.value === 'npu';
   $('#ollama-picker').hidden = !ollama;
-  $('#gguf-picker').hidden = ollama;
+  $('#gguf-picker').hidden = ollama || npu;
+  $('#npu-picker').hidden = !npu;
+  $('#temperature').disabled = npu;
+  if (npu) {
+    if (lastProvider !== 'npu') {
+      nonNpuContextTokens = Number($('#context_tokens').value) || 16384;
+      nonNpuMaxTokens = Number($('#max_tokens').value) || 4096;
+    }
+    $('#context_tokens').value = '4096';
+    $('#context_tokens').min = $('#context_tokens').max = '4096';
+    $('#max_tokens').value = '512';
+    $('#max_tokens').max = '1024';
+  } else {
+    $('#context_tokens').min = '8192';
+    $('#context_tokens').max = '262144';
+    $('#max_tokens').max = '16384';
+    if (lastProvider === 'npu') {
+      $('#context_tokens').value = String(nonNpuContextTokens);
+      $('#max_tokens').value = String(nonNpuMaxTokens);
+    }
+  }
+  lastProvider = providerSelect.value;
   if (ollama && !modelsLoaded) loadModels();
+  if (npu && !npuModelsLoaded) loadNpuModels();
   if (ollama && modelSelect.value) requestModelChange(modelSelect.value);
   if (!ollama && (modelResidency.loaded || modelResidency.busy)) requestModelChange('');
   schedulePreview();
@@ -357,7 +469,7 @@ function requestModelChange(model) {
 }
 
 modelSelect.addEventListener('change', () => {
-  requestModelChange(modelSelect.value);
+  if (providerSelect.value === 'ollama') requestModelChange(modelSelect.value);
   updateControls();
 });
 $('#offload-model').addEventListener('click', () => {
@@ -374,6 +486,8 @@ function updateConversationMode() {
     'Describe what to build, or ask for changes to a file…';
   $('#run').textContent = followupMode ? 'Ask follow-up →' : 'Send →';
   $('#followup-note').hidden = !followupMode;
+  if (followupMode && conversationModel) $('#followup-note').textContent =
+    `This chat uses ${conversationModel.split(/[\\/]/).pop()} until you start a new task. Use /run for a literal command, or enable Agent mode for approved tools.`;
   $('#composer-hint').textContent = followupMode ? 'Enter to ask · Shift+Enter for a new line.' :
     'Enter to send · Shift+Enter for a new line. Type / for commands or @ for output files.';
   $('#new-task').hidden = !hasConversation || running;
@@ -530,6 +644,49 @@ async function loadModels() {
 }
 $('#refresh-models').addEventListener('click', loadModels);
 
+async function loadNpuModels(preferred = '') {
+  if (loadingNpuModels) return;
+  loadingNpuModels = true;
+  const previous = preferred || npuModelSelect.value;
+  $('#npu-model-hint').textContent = 'Checking downloaded OpenVINO models…';
+  updateControls();
+  try {
+    const data = await request('/api/npu/models');
+    npuModelSelect.replaceChildren(new Option('Choose an NPU model…', ''));
+    for (const model of data.models) {
+      npuModelSelect.add(new Option(`${model.name} · ${(model.size / 1e9).toFixed(2)} GB`, model.path));
+    }
+    const selected = data.models.find(model => model.path === previous);
+    if (selected) npuModelSelect.value = selected.path;
+    $('#npu-model-hint').textContent = data.models.length
+      ? `${data.models.length} downloaded OpenVINO model(s). Choose one to use the NPU; inference can be slow.`
+      : 'No OpenVINO model downloaded yet. Enter a compatible Hugging Face model ID below.';
+    npuModelsLoaded = true;
+  } catch (error) {
+    $('#npu-model-hint').textContent = error.message;
+  } finally {
+    loadingNpuModels = false;
+    updateControls();
+  }
+}
+$('#refresh-npu-models').addEventListener('click', () => loadNpuModels());
+npuModelSelect.addEventListener('change', () => { updateControls(); schedulePreview(); });
+$('#import-npu-model').addEventListener('click', async () => {
+  const repoId = $('#npu-repo').value.trim();
+  if (!repoId) { formError = 'Enter a Hugging Face OpenVINO model ID.'; showErrors(); return; }
+  choosing = true;
+  $('#npu-model-hint').textContent = `Downloading ${repoId}…`;
+  updateControls();
+  try {
+    const result = await post('/api/npu/import', {repo_id: repoId});
+    formError = '';
+    npuModelsLoaded = false;
+    await loadNpuModels(result.model.path);
+    schedulePreview();
+  } catch (error) { formError = error.message; showErrors(); $('#npu-model-hint').textContent = error.message; }
+  finally { choosing = false; updateControls(); }
+});
+
 function completionContext() {
   const caret = instruction.selectionStart;
   const before = instruction.value.slice(0, caret);
@@ -652,13 +809,47 @@ $('#cancel').addEventListener('click', async () => {
 
 function renderGeneration(data) {
   const generation = data.generation || {};
-  if (inspectingOutput && !running) return;
+  if (inspectingOutput) return;
   if (data.mode === 'chat') {
     $('#generation').hidden = true;
     generationWasRunning = false;
     return;
   }
-  $('#generation').hidden = !generation.model && !running && !submitting;
+  const agentSteps = data.mode === 'agent' ? (data.agent_steps || []) : [];
+  const agentFiles = data.mode === 'agent' ? (data.files || []) : [];
+  $('#agent-steps').hidden = !agentSteps.length;
+  const stepSignature = JSON.stringify(agentSteps);
+  if ($('#agent-steps').dataset.signature !== stepSignature) {
+    $('#agent-steps').dataset.signature = stepSignature;
+    $('#agent-steps').replaceChildren(...agentSteps.slice(-30).map(step => {
+      const line = document.createElement('div');
+      line.className = 'agent-step';
+      const label = document.createElement('strong');
+      label.textContent = step.label || 'Working';
+      line.append(label);
+      if (step.detail) {
+        const detail = document.createElement('span');
+        detail.textContent = step.detail.slice(0, 2000);
+        line.append(detail);
+      }
+      return line;
+    }));
+    $('#agent-steps').scrollTop = $('#agent-steps').scrollHeight;
+  }
+  $('#agent-files').hidden = !agentFiles.length;
+  const filesSignature = JSON.stringify(agentFiles);
+  if ($('#agent-files').dataset.signature !== filesSignature) {
+    $('#agent-files').dataset.signature = filesSignature;
+    const title = document.createElement('strong'); title.textContent = 'Saved files';
+    $('#agent-files').replaceChildren(title, ...agentFiles.map((path, index) => {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'output-link';
+      button.textContent = path.split(/[\\/]/).pop(); button.title = path;
+      button.addEventListener('click', () => openSavedOutput(index));
+      return button;
+    }));
+  }
+  $('#generation').hidden = !generation.model && !running && !submitting && !agentSteps.length && !agentFiles.length;
   if (!generation.model) {
     if (running || submitting) {
       $('#generation').open = true;
@@ -678,7 +869,7 @@ function renderGeneration(data) {
     $('#generation').open = true;
     requestAnimationFrame(() => { threadScroll.scrollTop = threadScroll.scrollHeight; });
   }
-  if (!running && generationWasRunning) $('#generation').open = false;
+  if (!running && generationWasRunning && data.mode !== 'agent') $('#generation').open = false;
   generationWasRunning = running;
   const target = generation.target || 'Model response';
   if (target !== viewerTarget) {
@@ -697,10 +888,37 @@ function renderGeneration(data) {
     generation.phase === 'tool' ? 'working' : generation.phase === 'generating' ? 'streaming' : 'waiting';
   $('#generation-state').dataset.state = state;
   $('#generation-state').textContent = {streaming: '● Streaming', working: 'Working', complete: 'Complete', waiting: 'Waiting'}[state];
-  const text = generation.text || generation.activity ||
+  const latestPreview = [...agentSteps].reverse().find(step => step.preview);
+  const showPreview = data.mode === 'agent' && latestPreview &&
+    (!running || !generation.text || generation.phase === 'tool' || generation.phase === 'generated');
+  if (showPreview) {
+    viewerTarget = latestPreview.preview_path || latestPreview.files?.[0] || target;
+    $('#generation-target').textContent = viewerTarget;
+  }
+  const text = showPreview ? latestPreview.preview : generation.text || generation.activity ||
     (generation.phase === 'generated' ? 'Processing the model response…' :
       'Waiting for the model to produce its first token…');
-  showOutput(text, target);
+  const visibleText = data.mode === 'agent' && running && !showPreview && !generation.text && !generation.activity
+    ? `Model is preparing a tool request or answer. No text emitted yet (${elapsed}s).` : text;
+  showOutput(visibleText, viewerTarget);
+}
+
+async function openSavedOutput(index) {
+  try {
+    const output = await post('/api/output', {index});
+    inspectingOutput = true;
+    if (activityDialog.open) activityDialog.close();
+    $('#generation').hidden = false;
+    $('#generation').open = true;
+    requestAnimationFrame(() => $('#generation').scrollIntoView({block: 'nearest'}));
+    $('#generation-phase').textContent = 'Saved file contents';
+    $('#generation-target').textContent = output.path;
+    $('#generation-state').dataset.state = 'complete';
+    $('#generation-state').textContent = 'Saved';
+    viewerTarget = output.path;
+    viewerPreference = null;
+    showOutput(output.text + (output.truncated ? '\n[Preview truncated]' : ''), output.path);
+  } catch (error) { formError = error.message; showErrors(); }
 }
 
 function renderConversation(items) {
@@ -783,13 +1001,22 @@ function appendMessageContent(parent, text) {
 }
 
 function render(data) {
+  conversationModel = data.model || '';
   if (!restoredSession && data.provider) {
     restoredSession = true;
     providerSelect.value = data.provider;
+    lastProvider = data.provider;
     $('#ollama-picker').hidden = data.provider !== 'ollama';
     $('#gguf-picker').hidden = data.provider !== 'gguf';
+    $('#npu-picker').hidden = data.provider !== 'npu';
+    $('#temperature').disabled = data.provider === 'npu';
     if (data.provider === 'gguf') ggufPath.value = data.model || '';
-    else preferredModel = data.model || '';
+    if (data.provider === 'npu') npuModelSelect.dataset.preferred = data.model || '';
+    else if (data.provider === 'ollama') preferredModel = data.model || '';
+    if (data.provider === 'npu') {
+      $('#context_tokens').min = $('#context_tokens').max = '4096';
+      $('#max_tokens').max = '1024';
+    }
     $('#agent-mode').checked = Boolean(data.agent_mode);
     $('#agent-options').hidden = !data.agent_mode;
     nameInput.disabled = Boolean(data.agent_mode);
@@ -873,7 +1100,7 @@ function render(data) {
   }
   $('#result').hidden = !data.backup;
   $('#backup').textContent = data.backup;
-  $('#output-result').hidden = data.status !== 'succeeded';
+  $('#output-result').hidden = data.status !== 'succeeded' || !(data.files || []).length;
   $('#output-path').textContent = data.path || '';
   const signature = (data.files || []).join('\n');
   if (signature !== fileSignature) {
@@ -882,23 +1109,7 @@ function render(data) {
       const item = document.createElement('li');
       const button = document.createElement('button');
       button.type = 'button'; button.className = 'output-link'; button.textContent = path;
-      button.addEventListener('click', async () => {
-        try {
-          const output = await post('/api/output', {index});
-          inspectingOutput = true;
-          if (activityDialog.open) activityDialog.close();
-          $('#generation').hidden = false;
-          $('#generation').open = true;
-          requestAnimationFrame(() => $('#generation').scrollIntoView({block: 'nearest'}));
-          $('#generation-phase').textContent = 'Saved file contents';
-          $('#generation-target').textContent = output.path;
-          $('#generation-state').dataset.state = 'complete';
-          $('#generation-state').textContent = 'Saved';
-          viewerTarget = output.path;
-          viewerPreference = null;
-          showOutput(output.text + (output.truncated ? '\n[Preview truncated]' : ''), output.path);
-        } catch (error) { formError = error.message; showErrors(); }
-      });
+      button.addEventListener('click', () => openSavedOutput(index));
       item.append(button); return item;
     }));
   }
@@ -996,7 +1207,7 @@ async function poll() {
         sessionId = '';
         session = await request('/api/session');
       }
-      if (session.version !== 12) throw new Error('Restart the launcher to load the updated workflow server.');
+      if (session.version !== 16) throw new Error('Restart the launcher to load the updated workflow server.');
       token = session.token;
       sessionId = session.id;
       if (new URLSearchParams(location.search).get('session') !== sessionId)
@@ -1015,8 +1226,10 @@ async function poll() {
       schedulePreview();
     }
     render(data);
+    refreshWorkspace();
     refreshSessions().catch(() => {});
     if (providerSelect.value === 'ollama' && !modelsLoaded && !loadingModels) loadModels();
+    if (providerSelect.value === 'npu' && !npuModelsLoaded && !loadingNpuModels) loadNpuModels(npuModelSelect.dataset.preferred || '');
   } catch (error) {
     token = '';
     connected = false;
