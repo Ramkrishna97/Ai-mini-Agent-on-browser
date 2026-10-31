@@ -1,5 +1,6 @@
 """A completed workflow can be questioned without launching tools or writes."""
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -13,6 +14,19 @@ from ui_server import JobState
 
 
 class ChatTests(unittest.TestCase):
+    def test_agent_progress_records_saved_files_and_steps(self):
+        with TemporaryDirectory() as folder:
+            output = str(Path(folder) / "Solution.java")
+            state = JobState()
+            state.data.update(mode="agent", conversation=[{"role": "assistant", "text": "", "state": "working"}])
+            state.progress({"phase": "tool", "model": "fake", "delta": "draft tool arguments",
+                            "step": {"label": "Tool finished: write_file", "files": [output],
+                                     "preview": "public class Solution {}"}})
+            snapshot = state.snapshot()
+            self.assertEqual(snapshot["files"], [output])
+            self.assertEqual(snapshot["agent_steps"][-1]["preview"], "public class Solution {}")
+            self.assertEqual(snapshot["conversation"][-1]["text"], "")
+
     def test_agent_receives_user_link_even_without_tool_call(self):
         with TemporaryDirectory() as folder:
             state = JobState()
@@ -166,6 +180,8 @@ class ChatTests(unittest.TestCase):
             async def fake_agent(*args, **kwargs):
                 self.assertEqual(args[1], "Run the application")
                 self.assertIn("Build it", kwargs["reference_context"])
+                await asyncio.to_thread(logging.getLogger("workflow").warning,
+                                        "Agent command output reached the UI")
                 return "Ran with approval."
 
             with patch("ui_server.ensure_ollama"), patch("ui_server.create_engine", return_value=Engine()), patch(
@@ -178,6 +194,8 @@ class ChatTests(unittest.TestCase):
             self.assertEqual(state.snapshot()["status"], "succeeded", state.snapshot().get("error"))
             self.assertEqual(state.snapshot()["mode"], "agent")
             self.assertEqual(state.snapshot()["conversation"][-1]["text"], "Ran with approval.")
+            self.assertTrue(any("Agent command output reached the UI" in line
+                                for line in state.snapshot()["logs"]))
             agent.assert_called_once()
 
     def test_real_command_followup_records_exit_code_and_live_log(self):
