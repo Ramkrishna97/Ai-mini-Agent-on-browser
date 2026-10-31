@@ -5,6 +5,7 @@ bounded and the host application still asks for approval before each call.
 """
 
 import asyncio
+import argparse
 import os
 from pathlib import Path
 import re
@@ -105,6 +106,7 @@ async def run_code(language: str, code: str, filename: str = "main") -> dict:
     if not isinstance(code, str) or not 1 <= len(code) <= 20_000:
         raise ValueError("code must contain 1-20,000 characters")
     language = language.casefold()
+    output_files = []
     if language == "npm":
         script = code.strip()
         if not re.fullmatch(r"[A-Za-z0-9:_-]+", script):
@@ -116,15 +118,18 @@ async def run_code(language: str, code: str, filename: str = "main") -> dict:
         source = code.replace("public class Main", f"public class {filename}", 1)
         java_file = WORKSPACE / f"{filename}.java"
         java_file.write_text(source, encoding="utf-8")
+        output_files.append(str(java_file))
         command = f'javac "{java_file.name}"; if ($LASTEXITCODE -eq 0) {{ java "{filename}" }}'
     else:
         extension = "py" if language == "python" else "js"
         source_file = WORKSPACE / f".ollama_mcp_{filename}.{extension}"
         source_file.write_text(code, encoding="utf-8")
+        output_files.append(str(source_file))
         command = (f'& "{sys.executable}" "{source_file.name}"' if language == "python"
                    else f'node "{source_file.name}"')
     result = await asyncio.to_thread(run_command, command, WORKSPACE)
     result["output"] = result.get("output", "")[-MAX_OUTPUT:]
+    result["files"] = output_files
     return result
 
 
@@ -156,4 +161,19 @@ async def browser(action: str, url: str = "", selector: str = "", text: str = ""
 
 
 if __name__ == "__main__":
-    server.run(transport="stdio")
+    parser = argparse.ArgumentParser(description="Workspace MCP server")
+    parser.add_argument("--http", action="store_true", help="Serve Streamable HTTP on 127.0.0.1")
+    parser.add_argument("--port", type=int, default=3001, help="HTTP port (default: 3001)")
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("port must be between 1 and 65535")
+    if args.http:
+        # A standalone HTTP client does not pass through the app's approval gate.
+        # Expose only read-only tools on this opt-in transport.
+        http_server = MCPServer("local-workspace-read-only")
+        http_server.tool()(search_text)
+        http_server.tool()(fetch_url)
+        http_server.run(transport="streamable-http", host="127.0.0.1", port=args.port,
+                        streamable_http_path="/mcp")
+    else:
+        server.run(transport="stdio")
