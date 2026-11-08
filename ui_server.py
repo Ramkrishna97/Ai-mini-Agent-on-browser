@@ -40,6 +40,7 @@ from web_access import fetch_public_url, urls_in_text
 from workspace_view import list_workspace, read_workspace_file
 
 ROOT = Path(__file__).resolve().parent
+MODEL_IDLE_SECONDS = 600
 WORKFLOW_LOG_OWNER = contextvars.ContextVar("workflow_log_owner", default=None)
 LOG_ENTRY_LIMIT = 2000
 LOG_HISTORY_LIMIT = 300
@@ -82,6 +83,7 @@ class JobState:
         self.completed_context = None
         self.active_engine = None
         self.worker_active = False
+        self.last_model_activity = time.monotonic()
         self.on_change = on_change
 
     def persist(self):
@@ -118,6 +120,8 @@ class JobState:
     def progress(self, event):
         self.check_cancelled()
         with self.lock:
+            if event.get("delta") or event.get("phase") in {"generated", "ready"}:
+                self.last_model_activity = time.monotonic()
             generation = self.data.setdefault("generation", {})
             delta = event.get("delta", "")
             generation.update({key: value for key, value in event.items() if key != "delta"})
@@ -135,6 +139,20 @@ class JobState:
                 if self.data.get("mode") == "chat" and self.data.get("conversation"):
                     assistant = self.data["conversation"][-1]
                     assistant["text"] = (assistant["text"] + delta)[-32768:]
+            if isinstance(event.get("plan"), dict):
+                self.data["plan"] = event["plan"]
+
+    def expire_idle_engine(self, now=None):
+        """Release retained GGUF/NPU engines after ten minutes without activity."""
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            if self.worker_active or now - self.last_model_activity < MODEL_IDLE_SECONDS:
+                return False
+            engine = self.active_engine
+            self.active_engine = None
+        if engine and hasattr(engine, "close"):
+            engine.close()
+        return engine is not None
 
     def cancel(self):
         with self.lock:
@@ -180,6 +198,7 @@ class JobState:
             if self.worker_active:
                 return False
             self.worker_active = True
+            self.last_model_activity = time.monotonic()
             previous_engine = self.active_engine
             self.active_engine = None
             self.cancel_event.clear()
@@ -195,6 +214,7 @@ class JobState:
                          "temperature": settings.temperature if settings else 0.2,
                          "max_tokens": settings.max_tokens if settings else 4096,
                          "context_tokens": settings.context_tokens if settings else 16384,
+                         "thinking_effort": settings.thinking_effort if settings else "off", "plan": None,
                          "conversation": [{"role": "user", "text": instruction},
                                           {"role": "assistant", "text": "", "state": "working"}],
                          "chat_ready": False}
@@ -307,9 +327,12 @@ class JobState:
                 with self.lock:
                     self.worker_active = False
 
-    def start_chat(self, question, attachments=None, *, agent_mode=False, browser=False, mcp=False):
+    def start_chat(self, question, attachments=None, *, agent_mode=False, browser=False, mcp=False,
+                   thinking_effort=None):
         if not isinstance(question, str) or not 0 < len(question.strip()) <= 4000:
             raise ValueError("Enter a follow-up question of 1–4000 characters.")
+        if thinking_effort is not None and thinking_effort not in {"off", "low", "medium", "high"}:
+            raise ValueError("Thinking effort must be off, low, medium, or high.")
         command_lines = question.strip().splitlines()
         commands = None
         if command_lines[0].strip().lower().startswith("/run"):
@@ -327,11 +350,15 @@ class JobState:
             history = [dict(item) for item in self.data["conversation"][-16:]]
             self.cancel_event.clear()
             self.worker_active = True
+            self.last_model_activity = time.monotonic()
             self.data.update(status="running", mode="command" if commands else "agent" if agent_mode else "chat", generation={}, error="", answer="", logs=[], agent_steps=[],
-                             chat_ready=False, pending_tool=None)
+                             chat_ready=False, pending_tool=None, plan=None)
             self.data["conversation"] = history + [{"role": "user", "text": question.strip()},
                                                     {"role": "assistant", "text": "", "state": "working"}]
-            settings = self.chat_settings
+            settings = (replace(self.chat_settings, thinking_effort=thinking_effort)
+                        if thinking_effort is not None else self.chat_settings)
+            self.chat_settings = settings
+            self.data["thinking_effort"] = settings.thinking_effort
         self.persist()
         worker = threading.Thread(target=self.run_chat, args=(question.strip(), settings, prior, history,
                                                               attachments or [], commands, agent_mode, browser, mcp), daemon=False)
@@ -404,7 +431,10 @@ class JobState:
                 engine = create_engine(settings, progress=self.progress)
                 engine.health_check()
             elif settings.provider == "gguf":
+                engine.settings = settings
                 engine.health_check()
+            elif hasattr(engine, "settings"):
+                engine.settings = settings
             if agent_mode:
                 workspace = validate_location(prior.get("path") or str(ROOT))
                 if not workspace.is_dir():
@@ -542,6 +572,9 @@ class SessionStore:
             temporary = path.with_suffix(".tmp")
             temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
             temporary.replace(path)
+        activity = getattr(self, "on_model_activity", None)
+        if activity:
+            activity()
 
     def list(self):
         entries = []
@@ -571,15 +604,25 @@ class SessionStore:
         with self.lock:
             return any(job.worker_active for job in self.jobs.values())
 
+    def expire_idle_engines(self, now=None):
+        with self.lock:
+            jobs = list(self.jobs.values())
+        for job in jobs:
+            try:
+                job.expire_idle_engine(now)
+            except Exception as exc:
+                logging.getLogger("workflow").warning("Idle model cleanup failed: %s", describe_error(exc))
+
 
 class OllamaPreloader:
-    """Keep one app-selected Ollama model warm; reconcile rapid model switches."""
+    """Preload one model with Ollama's ten-minute idle residency timer."""
 
-    def __init__(self, client_factory=None, ready=None):
+    def __init__(self, client_factory=None, ready=None, active_check=None):
         self.lock = threading.Lock()
         self.endpoint = Settings().endpoint
         self.client_factory = client_factory or (lambda: OllamaEngine(Settings(endpoint=self.endpoint, timeout=300)).client)
         self.ready = ready or ensure_ollama
+        self.active_check = active_check or (lambda: False)
         self.selected = ""
         self.loaded = ""
         self.unload_queue = set()
@@ -587,9 +630,19 @@ class OllamaPreloader:
         self.phase = "off"
         self.error = ""
         self.cleared = False
+        self.expires_at = 0.0
+
+    def touch(self):
+        with self.lock:
+            if self.loaded:
+                self.expires_at = time.monotonic() + MODEL_IDLE_SECONDS
 
     def snapshot(self):
         with self.lock:
+            if (self.loaded and not self.busy and self.expires_at and
+                    time.monotonic() >= self.expires_at and not self.active_check()):
+                self.loaded = ""
+                self.phase = "off"
             return {"selected": self.selected, "loaded": self.loaded,
                     "busy": self.busy, "phase": self.phase, "error": self.error, "cleared": self.cleared}
 
@@ -653,6 +706,7 @@ class OllamaPreloader:
                     with self.lock:
                         if self.loaded == model:
                             self.loaded = ""
+                            self.expires_at = 0.0
                 else:
                     installed = {item.model for item in client.list().models}
                     if model not in installed:
@@ -660,11 +714,12 @@ class OllamaPreloader:
                     capabilities = client.show(model).capabilities or []
                     if capabilities and "completion" not in capabilities:
                         raise ModelError(f"Model {model!r} cannot generate text.")
-                    client.generate(model=model, prompt="", keep_alive=-1)
+                    client.generate(model=model, prompt="", keep_alive="10m")
                     if model not in {item.model for item in client.ps().models}:
                         raise ModelError(f"Ollama did not keep {model!r} loaded.")
                     with self.lock:
                         self.loaded = model
+                        self.expires_at = time.monotonic() + MODEL_IDLE_SECONDS
             except Exception as exc:
                 with self.lock:
                     if self.selected != model and action == "load":
@@ -680,9 +735,21 @@ class Server(ThreadingHTTPServer):
         super().__init__(address, Handler)
         self.token = secrets.token_urlsafe(32)
         self.sessions = SessionStore()
-        self.preloader = OllamaPreloader()
+        self.preloader = OllamaPreloader(active_check=self.sessions.any_active)
+        self.sessions.on_model_activity = self.preloader.touch
         self.dialog_lock = threading.Lock()
         self.origin = f"http://127.0.0.1:{self.server_port}"
+        self._reaper_stop = threading.Event()
+        self._reaper = threading.Thread(target=self._reap_idle_models, daemon=True, name="model-idle-reaper")
+        self._reaper.start()
+
+    def _reap_idle_models(self):
+        while not self._reaper_stop.wait(5):
+            self.sessions.expire_idle_engines()
+
+    def server_close(self):
+        self._reaper_stop.set()
+        super().server_close()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -729,13 +796,17 @@ class Handler(BaseHTTPRequestHandler):
         if route.path in assets:
             filename, mime = assets[route.path]
             self.respond(200, (ROOT / filename).read_bytes(), mime + "; charset=utf-8")
+        elif route.path == "/api/health":
+            self.respond(200, {"application": "local-workflow", "version": 17,
+                               "idle_offload_seconds": MODEL_IDLE_SECONDS})
         elif route.path == "/api/session":
             try:
                 requested = parse_qs(route.query).get("id", [""])[0]
                 session_id = requested or self.server.sessions.create()
                 self.server.sessions.get(session_id)
-                self.respond(200, {"token": self.server.token, "application": "local-workflow", "version": 16,
-                                   "id": session_id, "workspace": str(ROOT), "default_name": "generated-project"})
+                self.respond(200, {"token": self.server.token, "application": "local-workflow", "version": 17,
+                                   "id": session_id, "workspace": str(ROOT), "default_name": "generated-project",
+                                   "idle_offload_seconds": MODEL_IDLE_SECONDS})
             except (ValueError, OSError) as exc:
                 self.respond(404, {"error": str(exc)})
         elif route.path == "/api/sessions":
@@ -817,7 +888,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not job.start_chat(payload.get("question"), attachments,
                                       agent_mode=payload.get("agent_mode") is True,
                                       browser=payload.get("browser") is True,
-                                      mcp=payload.get("mcp") is True):
+                                      mcp=payload.get("mcp") is True,
+                                      thinking_effort=payload.get("thinking_effort")):
                     self.respond(409, {"error": "A workflow is already running. Wait for it to finish."})
                 else:
                     self.respond(202, {"status": "running"})
@@ -907,7 +979,7 @@ class Handler(BaseHTTPRequestHandler):
                 settings = Settings(provider=provider, model_name=model, temperature=float(payload.get("temperature", 0.2)),
                                     max_tokens=max_tokens, context_tokens=context_tokens,
                                     chunk_chars=1000 if provider == "npu" else 6000,
-                                    keep_alive=-1 if provider == "ollama" else "10m")
+                                    keep_alive="10m", thinking_effort=payload.get("thinking_effort", "off"))
             if settings and provider == "ollama" and self.server.preloader.snapshot()["busy"]:
                 self.respond(409, {"error": "Wait for the selected Ollama model to finish loading."})
                 return
@@ -1008,7 +1080,7 @@ def main():
             with urlopen(f"http://127.0.0.1:{args.port}/api/session", timeout=2) as response:
                 previous = json.load(response)
             if previous.get("application") == "local-workflow":
-                if previous.get("version") != 16:
+                if previous.get("version") != 17:
                     parser.exit(1, "An older Local Workflow server is still running. Run stop.bat, then start.bat.\n")
                 if not args.no_browser:
                     webbrowser.open(f"http://127.0.0.1:{args.port}")
