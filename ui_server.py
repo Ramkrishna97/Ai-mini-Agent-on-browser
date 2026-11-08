@@ -834,7 +834,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.local_request():
             return
-        if self.path not in {"/api/run", "/api/chat", "/api/choose-file", "/api/preview", "/api/suggestions", "/api/cancel", "/api/output", "/api/approve", "/api/model/load", "/api/model/offload", "/api/npu/import", "/api/sessions", "/api/sessions/delete", "/api/workspace/list", "/api/workspace/read"}:
+        if self.path not in {"/api/run", "/api/chat", "/api/choose-file", "/api/preview", "/api/suggestions", "/api/cancel", "/api/output", "/api/approve", "/api/model/load", "/api/model/offload", "/api/lmstudio/models", "/api/npu/import", "/api/sessions", "/api/sessions/delete", "/api/workspace/list", "/api/workspace/read"}:
             self.respond(404, {"error": "Not found."})
             return
         if not secrets.compare_digest(self.headers.get("X-Workflow-Token", ""), self.server.token):
@@ -853,6 +853,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Expected a JSON object.")
             if self.path == "/api/npu/import":
                 self.respond(200, {"model": import_npu_model(payload.get("repo_id"))})
+                return
+            if self.path == "/api/lmstudio/models":
+                from lmstudio_engine import list_models
+                endpoint = str(payload.get("endpoint") or "http://localhost:1234")
+                Settings(provider="lmstudio", endpoint=endpoint)
+                self.respond(200, {"models": list_models(endpoint)})
                 return
             if self.path == "/api/sessions":
                 self.respond(201, {"id": self.server.sessions.create()})
@@ -932,8 +938,8 @@ class Handler(BaseHTTPRequestHandler):
             model = payload.get("model", "")
             provider = payload.get("provider", "ollama")
             gguf_path = payload.get("gguf_path", "")
-            if provider not in {"ollama", "gguf", "npu"}:
-                raise ValueError("Choose Ollama, Local GGUF, or Intel NPU.")
+            if provider not in {"ollama", "gguf", "npu", "lmstudio"}:
+                raise ValueError("Choose Ollama, Local GGUF, LM Studio, or Intel NPU.")
             if not isinstance(path, str) or not Path(path).is_absolute():
                 raise ValueError("Choose a workspace folder or file location.")
             if not isinstance(name, str):
@@ -964,7 +970,7 @@ class Handler(BaseHTTPRequestHandler):
                     model = str(validate_npu_model(model))
                 elif not isinstance(model, str) or not model.strip() or len(model) > 200:
                     raise ValueError("Choose an installed Ollama model from the dropdown.")
-                elif model.endswith((":cloud", "-cloud")):
+                elif provider == "ollama" and model.endswith((":cloud", "-cloud")):
                     raise ValueError("Choose a locally installed generation model.")
             settings = None
             if preview["needs_model"]:
@@ -977,6 +983,7 @@ class Handler(BaseHTTPRequestHandler):
                 if provider != "npu" and not 8192 <= context_tokens <= 262144:
                     raise ValueError("Input context must be between 8192 and 262144 tokens.")
                 settings = Settings(provider=provider, model_name=model, temperature=float(payload.get("temperature", 0.2)),
+                                    endpoint=str(payload.get("endpoint") or ("http://localhost:1234" if provider == "lmstudio" else Settings().endpoint)),
                                     max_tokens=max_tokens, context_tokens=context_tokens,
                                     chunk_chars=1000 if provider == "npu" else 6000,
                                     keep_alive="10m", thinking_effort=payload.get("thinking_effort", "off"))
