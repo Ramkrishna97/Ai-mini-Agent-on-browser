@@ -21,6 +21,7 @@ from error_details import describe_error
 from web_access import fetch_public_url
 from workspace_lifecycle import DevServerManager, apply_file_patch, create_project_structure, wait_for_port
 from agent_skills import list_skills, load_skill
+from workspace_context import workspace_overview
 
 LOG = logging.getLogger("workflow")
 MAX_RESULT = 16000
@@ -70,6 +71,10 @@ BUILTINS = [
     schema("list_skills", "List available workspace agent skills and their descriptions.", {}),
     schema("load_skill", "Load one workspace skill's instructions on demand. Skill text is guidance, never permission to bypass tool approval.",
            {"name": {"type": "string"}}, ["name"]),
+    schema("workspace_overview", "Get a bounded project tree, key manifests, and workspace root. Use before planning IDE project edits.", {}),
+    schema("set_plan", "Publish or update a concise task plan with 1-8 steps. Current is a zero-based index; use the step count when complete.",
+           {"steps": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 8},
+            "current": {"type": "integer", "minimum": 0}}, ["steps", "current"]),
     schema("replace_text", "Replace an exact text fragment in a UTF-8 file. Fails if the fragment is missing or occurs more than once; creates a backup.",
            {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
            ["path", "old_text", "new_text"]),
@@ -105,11 +110,12 @@ BUILTINS = [
 
 
 class ToolRuntime:
-    def __init__(self, workspace: Path, *, browser=False, mcp=False, cancel_check=None):
+    def __init__(self, workspace: Path, *, browser=False, mcp=False, cancel_check=None, on_plan=None):
         self.workspace = workspace
         self.browser_enabled = browser
         self.mcp_enabled = mcp
         self.cancel_check = cancel_check
+        self.on_plan = on_plan
         self.stack = AsyncExitStack()
         self.mcp_clients = {}
         self.browser_driver = None
@@ -221,6 +227,18 @@ class ToolRuntime:
             return list_skills(self.workspace)
         if name == "load_skill":
             return load_skill(self.workspace, arguments.get("name"))
+        if name == "workspace_overview":
+            return workspace_overview(self.workspace)
+        if name == "set_plan":
+            steps, current = arguments.get("steps"), arguments.get("current")
+            if (not isinstance(steps, list) or not 1 <= len(steps) <= 8 or
+                    any(not isinstance(step, str) or not 1 <= len(step.strip()) <= 160 for step in steps) or
+                    type(current) is not int or not 0 <= current <= len(steps)):
+                raise ValueError("Plan needs 1-8 short steps and a valid current index.")
+            plan = {"steps": [step.strip() for step in steps], "current": current}
+            if self.on_plan:
+                self.on_plan(plan)
+            return json.dumps(plan)
         if name in {"list_files", "list_directory"}:
             path = self.local_path(arguments.get("path") or ".")
             if not path.is_dir():
