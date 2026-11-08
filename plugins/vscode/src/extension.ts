@@ -132,6 +132,7 @@ class ChatView implements vscode.WebviewViewProvider {
   private extraSkillRoot = '';
   private extraMcpConfig = '';
   private modelsLoaded = false;
+  private started = false;
   private effort = 'off';
   private mcp = false;
   private browser = false;
@@ -145,8 +146,10 @@ class ChatView implements vscode.WebviewViewProvider {
     view.webview.options = { enableScripts: true };
     view.webview.html = this.html();
     view.webview.onDidReceiveMessage(message => void this.handle(message).catch(error => this.error(error)));
-    this.timer = setInterval(() => void this.refresh().catch(error => this.error(error)), 1000);
-    void this.refresh().catch(error => this.error(error));
+    this.timer = setInterval(() => { if (this.started) void this.refresh().catch(error => this.error(error)); }, 1000);
+    try { this.send({ type: 'workspace', workspace: this.workspace().uri.fsPath }); }
+    catch (error) { this.error(error); }
+    void this.listModels().catch(error => this.error(error));
     view.onDidDispose(() => { if (this.timer) clearInterval(this.timer); this.view = undefined; });
   }
 
@@ -167,10 +170,6 @@ class ChatView implements vscode.WebviewViewProvider {
     try {
       const root = this.workspace();
       await this.backend.connect(root.uri.fsPath);
-      if (!this.modelsLoaded) {
-        this.modelsLoaded = true;
-        void this.listModels().catch(error => { this.modelsLoaded = false; this.error(error); });
-      }
       const status = await this.backend.request('/api/status');
       this.lastState = status;
       if (!this.model) {
@@ -187,16 +186,39 @@ class ChatView implements vscode.WebviewViewProvider {
   }
 
   private async listModels(): Promise<void> {
-    const data = this.provider === 'lmstudio'
-      ? await this.backend.request('/api/lmstudio/models', { endpoint: this.endpoint })
-      : this.provider === 'ollama' ? await this.backend.request('/api/models') : { models: [] };
-    this.send({ type: 'models', models: data.models, provider: this.provider });
+    if (this.provider === 'gguf') return;
+    const provider = this.provider;
+    const rawEndpoint = provider === 'lmstudio' ? this.endpoint : (process.env.OLLAMA_HOST || 'http://127.0.0.1:11434');
+    const endpoint = new URL(rawEndpoint.includes('://') ? rawEndpoint : `http://${rawEndpoint}`);
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(endpoint.hostname))
+      throw new Error('Model discovery is limited to local model servers.');
+    const base = endpoint.origin + (provider === 'lmstudio' ? endpoint.pathname.replace(/\/v1\/?$/, '').replace(/\/$/, '') : '');
+    let response = await fetch(base + (provider === 'lmstudio' ? '/api/v1/models' : '/api/tags'),
+      { signal: AbortSignal.timeout(5000) });
+    if (provider === 'lmstudio' && response.status === 404)
+      response = await fetch(base + '/v1/models', { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`${provider === 'lmstudio' ? 'LM Studio' : 'Ollama'} model list returned ${response.status}.`);
+    const data = await response.json() as Json;
+    const models = provider === 'lmstudio'
+      ? (data.models || data.data || []).map((item: Json) => ({ name: item.key || item.id,
+        label: item.display_name || item.key || item.id, can_generate: !item.type || item.type === 'llm' }))
+      : (data.models || []).map((item: Json) => ({ name: item.name || item.model, can_generate: true }));
+    this.modelsLoaded = true;
+    this.send({ type: 'models', models, provider });
   }
 
   private async handle(message: Json): Promise<void> {
-    const root = this.workspace();
-    await this.backend.connect(root.uri.fsPath);
     if (message.type === 'start') {
+      const root = this.workspace();
+      this.send({ type: 'starting' });
+      await this.backend.connect(root.uri.fsPath);
+      this.started = true;
+      if (this.provider === 'ollama') {
+        try {
+          const data = await this.backend.request('/api/models');
+          this.send({ type: 'models', models: data.models, provider: 'ollama' });
+        } catch (error) { this.error(error); }
+      }
       await this.refresh();
     } else if (message.type === 'provider') {
       this.provider = ['ollama', 'gguf', 'lmstudio'].includes(message.provider) ? message.provider : 'ollama';
@@ -205,7 +227,7 @@ class ChatView implements vscode.WebviewViewProvider {
       this.modelsLoaded = false;
       await this.listModels();
       this.modelsLoaded = true;
-      await this.refresh();
+      if (this.started) await this.refresh();
     } else if (message.type === 'models') {
       this.endpoint = String(message.endpoint || this.endpoint);
       await this.listModels();
@@ -213,16 +235,19 @@ class ChatView implements vscode.WebviewViewProvider {
     } else if (message.type === 'gguf') {
       const chosen = await vscode.window.showOpenDialog({ canSelectFiles: true, canSelectFolders: false,
         canSelectMany: false, filters: { 'GGUF models': ['gguf'] }, openLabel: 'Use GGUF model' });
-      if (chosen?.[0]) { this.ggufPath = chosen[0].fsPath; this.model = this.ggufPath; await this.refresh(); }
+      if (chosen?.[0]) { this.ggufPath = chosen[0].fsPath; this.model = this.ggufPath; this.send({ type: 'ggufSelected', path: this.ggufPath }); }
     } else if (message.type === 'lmSkills') {
       const chosen = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true,
         canSelectMany: false, openLabel: 'Use skill folder' });
-      if (chosen?.[0]) { this.extraSkillRoot = chosen[0].fsPath; await this.refresh(); }
+      if (chosen?.[0]) { this.extraSkillRoot = chosen[0].fsPath; if (this.started) await this.refresh(); }
     } else if (message.type === 'lmMcp') {
       const chosen = await vscode.window.showOpenDialog({ canSelectFiles: true, canSelectFolders: false,
         canSelectMany: false, filters: { 'JSON configuration': ['json'] }, openLabel: 'Use MCP configuration' });
-      if (chosen?.[0]) { this.extraMcpConfig = chosen[0].fsPath; await this.refresh(); }
+      if (chosen?.[0]) { this.extraMcpConfig = chosen[0].fsPath; if (this.started) await this.refresh(); }
     } else if (message.type === 'load') {
+      const root = this.workspace();
+      this.started = true;
+      await this.backend.connect(root.uri.fsPath);
       this.model = String(message.model || '');
       if (!this.model) throw new Error('Choose a model from the list.');
       this.contextTokens = Number(message.contextTokens || this.contextTokens);
@@ -231,6 +256,9 @@ class ChatView implements vscode.WebviewViewProvider {
         model: this.model, endpoint: String(message.endpoint || this.endpoint), context_tokens: this.contextTokens });
       await this.refresh();
     } else if (message.type === 'prompt') {
+      const root = this.workspace();
+      this.started = true;
+      await this.backend.connect(root.uri.fsPath);
       this.provider = ['ollama', 'gguf', 'lmstudio'].includes(message.provider) ? message.provider : 'ollama';
       this.endpoint = String(message.endpoint || this.endpoint);
       this.contextTokens = Number(message.contextTokens || this.contextTokens);
@@ -239,6 +267,7 @@ class ChatView implements vscode.WebviewViewProvider {
       this.effort = ['off', 'low', 'medium', 'high'].includes(message.effort) ? message.effort : 'off';
       this.mcp = message.mcp === true;
       this.browser = message.browser === true;
+      const agentMode = message.agentMode !== false;
       const text = String(message.text || '').trim();
       if (!text) return;
       const active = vscode.window.activeTextEditor?.document.uri;
@@ -248,7 +277,8 @@ class ChatView implements vscode.WebviewViewProvider {
       const status = this.lastState;
       if (status?.chat_ready && status.conversation?.length &&
           status.provider === this.provider && status.model === this.model) {
-        await this.backend.request('/api/chat', { question: instruction, agent_mode: true, mcp: this.mcp,
+        await this.backend.request('/api/chat', { question: instruction, agent_mode: agentMode,
+          chat_only: !agentMode, mcp: agentMode && this.mcp,
           browser: this.browser, thinking_effort: this.effort });
       } else {
         if (status?.conversation?.length) await this.backend.newChat();
@@ -257,7 +287,7 @@ class ChatView implements vscode.WebviewViewProvider {
           endpoint: this.provider === 'lmstudio' ? this.endpoint : undefined,
           extra_skill_root: this.provider === 'lmstudio' ? this.extraSkillRoot : undefined,
           extra_mcp_config: this.provider === 'lmstudio' && this.mcp ? this.extraMcpConfig : undefined,
-          agent_mode: true, mcp: this.mcp, thinking_effort: this.effort,
+          agent_mode: agentMode, chat_only: !agentMode, mcp: agentMode && this.mcp, thinking_effort: this.effort,
           browser: this.browser,
           max_tokens: 4096, context_tokens: this.contextTokens, temperature: 0.2 });
       }
@@ -268,8 +298,13 @@ class ChatView implements vscode.WebviewViewProvider {
         always: message.always === true });
       await this.refresh();
     } else if (message.type === 'cancel') {
+      if (!this.started) { this.send({ type: 'state', message: 'No request is running.' }); return; }
       await this.backend.request('/api/cancel', {});
+      await this.refresh();
     } else if (message.type === 'new') {
+      const root = this.workspace();
+      this.started = true;
+      await this.backend.connect(root.uri.fsPath);
       await this.backend.newChat();
       this.lastState = undefined;
       await this.refresh();
@@ -302,7 +337,7 @@ class ChatView implements vscode.WebviewViewProvider {
       <div class="row" id="lmRow"><input id="endpoint" type="url" value="http://localhost:1234" aria-label="LM Studio API URL"><button id="connectLm">Connect</button></div>
       <div class="row"><label>Context <input id="contextTokens" type="number" min="16384" max="262144" step="1024" value="16384" aria-label="Context tokens"></label></div>
       <div id="lmExtras"><div class="row"><button id="lmSkills">Choose skill folder</button><button id="lmMcp">Choose MCP JSON</button></div><p id="lmSources" class="small">Optional local sources; MCP tools still require approval.</p></div>
-      <div class="row"><label>Thinking <select id="effort"><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><input type="checkbox" id="mcp"> MCP</label><label><input type="checkbox" id="browser"> Browser</label></div>
+      <div class="row"><label>Mode <select id="mode"><option value="agent">Agent · plan and edit</option><option value="chat">Chat · answer only</option></select></label><label>Thinking <select id="effort"><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><input type="checkbox" id="mcp"> MCP</label><label><input type="checkbox" id="browser"> Browser</label></div>
       <p id="workspace" class="small"></p><p id="state" class="small">Connecting…</p></div><div class="content"><div id="plan"></div><div id="approval" hidden></div><div id="thread"></div>
       <p id="error" role="alert"></p></div><div class="composer"><textarea id="prompt" aria-label="Request" placeholder="Ask to plan, edit, run, or fix code in this workspace"></textarea>
       <div class="sendrow"><span class="small">Enter sends · Shift+Enter adds a line</span><button id="send" class="primary">Send</button></div></div></div><script nonce="${nonce}">
@@ -310,17 +345,22 @@ class ChatView implements vscode.WebviewViewProvider {
       const post=(type,more={})=>api.postMessage({type,...more});
       const showProvider=()=>{const p=$('provider').value;$('modelRow').style.display=p==='gguf'?'none':'flex';$('ggufRow').style.display=p==='gguf'?'flex':'none';$('lmRow').style.display=p==='lmstudio'?'flex':'none';$('lmExtras').style.display=p==='lmstudio'?'block':'none';$('load').textContent=p==='lmstudio'?'Load in LM Studio':'Load';};
       $('provider').onchange=()=>{showProvider();selected='';post('provider',{provider:$('provider').value,endpoint:$('endpoint').value});};
+      $('model').onchange=()=>{selected=$('model').value;};
       $('refresh').onclick=()=>post('models',{endpoint:$('endpoint').value});$('connectLm').onclick=$('refresh').onclick;
       $('load').onclick=()=>post('load',{model:$('model').value,endpoint:$('endpoint').value,contextTokens:$('contextTokens').value});$('chooseGguf').onclick=()=>post('gguf');$('start').onclick=()=>post('start');
       $('lmSkills').onclick=()=>post('lmSkills');$('lmMcp').onclick=()=>post('lmMcp');
       $('new').onclick=()=>post('new'); $('cancel').onclick=()=>post('cancel');
-      $('send').onclick=()=>{const text=$('prompt').value.trim();if(text)post('prompt',{text,provider:$('provider').value,model:$('model').value,endpoint:$('endpoint').value,contextTokens:$('contextTokens').value,effort:$('effort').value,mcp:$('mcp').checked,browser:$('browser').checked});};
+      $('send').onclick=()=>{const text=$('prompt').value.trim();if(text)post('prompt',{text,provider:$('provider').value,model:$('model').value,endpoint:$('endpoint').value,contextTokens:$('contextTokens').value,effort:$('effort').value,agentMode:$('mode').value==='agent',mcp:$('mcp').checked,browser:$('browser').checked});};
       $('prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('send').click();}};
       window.addEventListener('message',event=>{const data=event.data;
         if(data.type==='error'){$('error').textContent=data.message;return;}
+        if(data.type==='workspace'){$('workspace').textContent=data.workspace;$('state').textContent='Choose a model, then Start';return;}
+        if(data.type==='starting'){$('state').textContent='Starting local agent…';$('error').textContent='';return;}
+        if(data.type==='state'){$('state').textContent=data.message;return;}
+        if(data.type==='ggufSelected'){$('ggufPath').textContent=data.path;return;}
         if(data.type==='sent'){if($('prompt').value.trim()===data.text)$('prompt').value='';return;}
         if(data.type==='models'){if(data.provider!==$('provider').value)return;const previous=$('model').value||selected;$('model').replaceChildren(new Option('Choose model',''),...(data.models||[]).filter(m=>m.can_generate).map(m=>new Option(m.label||m.name,m.name)));if(Array.from($('model').options).some(o=>o.value===previous))$('model').value=previous;return;}
-        if(data.type!=='status')return;const s=data.status;selected=data.model||selected;
+        if(data.type!=='status')return;const s=data.status;if(!selected)selected=data.model||'';
         if(selected&&$('model').value!==selected&&!Array.from($('model').options).some(o=>o.value===selected))$('model').add(new Option(selected,selected));
         if(selected&&data.provider===$('provider').value)$('model').value=selected;
         if(!initialized){$('effort').value=s.thinking_effort||data.effort||'off';initialized=true;}

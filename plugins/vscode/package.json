@@ -2,7 +2,7 @@
   "name": "ai-agent-mini",
   "displayName": "AI Agent Mini",
   "description": "Local coding agent for your VS Code workspace",
-  "version": "0.3.0",
+  "version": "0.2.0",
   "publisher": "local-ai-agent-mini",
   "engines": {"vscode": "^1.96.0"},
   "categories": ["Other"],
