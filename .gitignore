@@ -6,3 +6,7 @@ __pycache__/
 mcp_servers.json
 .runtime/
 .sessions/
+plugins/vscode/node_modules/
+plugins/vscode/dist/
+plugins/intellij/.gradle/
+plugins/intellij/build/
