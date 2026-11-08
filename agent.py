@@ -240,7 +240,7 @@ async def run_agent(workspace: Path, instruction: str, settings, engine, approve
             messages.append({"role": "assistant", "content": "", "tool_calls": [
                 {"id": call.id, "type": "function", "function": {
                     "name": call.function.name,
-                    "arguments": (json.dumps(call.function.arguments) if settings.provider == "gguf"
+                    "arguments": (json.dumps(call.function.arguments) if settings.provider in {"gguf", "lmstudio"}
                                   else call.function.arguments)}}
                 for call in calls]} if fallback else getattr(assistant, "raw", assistant))
             for call in calls:
