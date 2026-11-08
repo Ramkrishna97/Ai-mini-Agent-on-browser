@@ -74,12 +74,17 @@ The web app and [start.bat](./start.bat) remain the browser entry point. IDE
 adapters live separately under [plugins/](./plugins/), and both use the same
 loopback backend and approval-gated agent:
 
-- [VS Code extension](./plugins/vscode/README.md): run `npm install` and
-  `npm run package` from `plugins/vscode`, then install the resulting `.vsix`
-  through **Extensions → Install from VSIX**.
-- [IntelliJ IDEA plugin](./plugins/intellij/README.md): run `gradle buildPlugin`
-  from `plugins/intellij` with Java 17, then install the generated ZIP through
-  **Settings → Plugins → Install Plugin from Disk**.
+- **VS Code:** Open **Extensions → ⋯ → Install from VSIX**, select the
+  [checked-in VSIX](./plugins/releases/ai-agent-mini-vscode-0.2.0.vsix), and
+  reload the VS Code window. This updates the existing AI Agent Mini extension.
+- **IntelliJ IDEA:** Open **Settings → Plugins → ⚙ → Install Plugin from Disk**,
+  select the [checked-in ZIP](./plugins/releases/ai-agent-mini-intellij-0.2.0.zip),
+  and restart IntelliJ. This updates the existing AI Agent Mini plugin.
+
+Both installable packages are committed under [plugins/releases/](./plugins/releases/).
+To rebuild them from source, follow the [VS Code build instructions](./plugins/vscode/README.md)
+or [IntelliJ build instructions](./plugins/intellij/README.md); rebuilds are not
+automatically copied to the checked-in releases folder.
 
 When the browser app is running, either plugin connects to it. Otherwise the
 plugin starts its bundled backend without opening a browser; no app-folder
