@@ -1,0 +1,10 @@
+<idea-plugin>
+  <id>local.aiagentmini.intellij</id>
+  <name>AI Agent Mini</name>
+  <vendor>Local AI Agent Mini</vendor>
+  <description>Local approval-gated coding agent for the current IntelliJ project.</description>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <toolWindow id="AI Agent Mini" anchor="right" factoryClass="local.aiagentmini.intellij.AgentToolWindowFactory"/>
+  </extensions>
+</idea-plugin>
