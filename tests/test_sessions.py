@@ -1,6 +1,7 @@
 """Saved conversations remain independent and reusable after an application restart."""
 
 import json
+from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
 import time
@@ -9,10 +10,32 @@ from unittest.mock import patch
 from urllib.request import Request, urlopen
 
 from config import Settings, WorkflowCancelled
-from ui_server import Server, SessionStore
+from ui_server import Server, SessionStore, clear_legacy_sessions
 
 
 class SessionStoreTests(unittest.TestCase):
+    def test_default_sessions_are_process_local(self):
+        with TemporaryDirectory() as folder, patch("ui_server.ROOT", Path(folder)):
+            first = SessionStore()
+            session_id = first.create()
+            first.get(session_id).persist()
+            self.assertEqual(first.list()[0]["id"], session_id)
+            self.assertFalse((Path(folder) / ".sessions").exists())
+            with self.assertRaises(ValueError):
+                SessionStore().get(session_id)
+
+    def test_startup_clears_only_legacy_app_session_records(self):
+        with TemporaryDirectory() as folder, patch("ui_server.ROOT", Path(folder)):
+            cache = Path(folder) / ".sessions"
+            cache.mkdir()
+            legacy = cache / ("a" * 32 + ".json")
+            legacy.write_text("{}", encoding="utf-8")
+            unrelated = cache / "notes.json"
+            unrelated.write_text("keep", encoding="utf-8")
+            clear_legacy_sessions()
+            self.assertFalse(legacy.exists())
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep")
+
     def test_old_per_tool_approval_migrates_to_chat_scope(self):
         with TemporaryDirectory() as folder:
             store = SessionStore(folder)

@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read a UTF-8 local text file, at most 64 KB.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "Absolute path or path relative to the selected workspace."}
+        },
+        "required": ["path"]
+      }
+    },
+    {
+      "name": "write_file",
+      "description": "Write a UTF-8 local text file, creating a backup when replacing an existing file.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "Absolute path or path relative to the selected workspace."},
+          "content": {"type": "string", "description": "UTF-8 text, at most 64 KB when encoded."}
+        },
+        "required": ["path", "content"]
+      }
+    },
+    {
+      "name": "run_command",
+      "description": "Run a local command with a hard 60-second limit and captured stdout/stderr. On Windows, PowerShell is used unless the command contains CMD-style && or || chaining, which uses CMD. cwd defaults to the selected workspace.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "command": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "cwd": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "Existing absolute directory or directory relative to the selected workspace."}
+        },
+        "required": ["command"]
+      }
+    },
+    {
+      "name": "list_directory",
+      "description": "List up to 200 entries in one local directory.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "Absolute path or path relative to the selected workspace."}
+        },
+        "required": ["path"]
+      }
+    }
+  ]
+}

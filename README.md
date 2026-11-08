@@ -82,13 +82,26 @@ loopback backend and approval-gated agent:
   **Settings → Plugins → Install Plugin from Disk**.
 
 When the browser app is running, either plugin connects to it. Otherwise the
-plugin can start the same backend without opening a browser; it needs the app
-folder path once. Listing/loading a model starts Ollama if needed. The current
+plugin starts its bundled backend without opening a browser; no app-folder
+path is required. Listing/loading an Ollama model starts Ollama if needed. The current
 IDE project root is the agent workspace, and the active editor path is supplied
 with each request. The agent can plan, edit, run checks, inspect diagnostics,
 and repair failures through its existing tools. The tool window/sidebar displays
 the plan, conversation, saved files, and approval requests. MCP tools are opt-in
 and use the same built-in local MCP server and `mcp_servers.json` configuration.
+Both plugins also support local GGUF files and LM Studio's local API. For LM Studio,
+choose a model and context size, then click **Load in LM Studio**. You can
+select a local skill folder or `mcp.json` file explicitly; these are loaded by
+this app's agent, not by LM Studio's separate native agent API. MCP still
+requires the plugin toggle and approval of tool calls. This importer supports
+local stdio servers and loopback HTTP MCP endpoints, not LM Studio-managed
+OAuth/remote MCP connections.
+
+Project-specific conversation and plan data now live in memory and disappear
+when the backend stops. On the next startup, only legacy app-owned session
+record files in `.sessions/` are removed. Model residency expires after ten
+minutes of inactivity; this app offloads LM Studio instances it explicitly
+loaded, while Ollama and local GGUF retain their existing idle handling.
 
 ### Intel NPU model source
 
@@ -97,7 +110,9 @@ Ollama is the default model source for new conversations. Choose
 locally downloaded OpenVINO model on a
 detected Intel NPU. The app discovers complete models in `.runtime/npu-models/`
 and lets you select any of them. Enter a compatible Hugging Face OpenVINO model
-ID and click **Download** to add another without changing code. Automatic
+ID and click **Download** to add another without changing code. NPU use first
+requires `.\.venv\Scripts\python.exe -m pip install -r requirements-npu.txt` in the app's virtual
+environment; Ollama, GGUF, and LM Studio do not need those packages. Automatic
 downloads are capped at 1.5 GB; model size is only a download policy, not a
 guarantee of NPU compatibility. Compiled files are cached in `.runtime/npu-cache/`.
 The first model load can take several minutes. The app checks for an NPU and
@@ -213,7 +228,8 @@ ai-agent-mini/
 ├── file_manager.py           # Path checks, locks, snapshots, backups, atomic recovery
 ├── prompter.py               # Line-based chunking, prompts, regex extraction, validation
 ├── main.py                   # CLI and fixed workflow
-├── requirements.txt          # Ollama Python dependency
+├── requirements.txt          # Standard Python dependencies
+├── requirements-npu.txt      # Optional Intel NPU dependencies
 ├── README.md
 ├── .gitignore
 └── tests/
@@ -263,13 +279,13 @@ variable. Ollama does not need to be installed or running.
 CLI example:
 
 ```powershell
-.\.venv\Scripts\python.exe main.py '.\example.py' --instruction 'Improve the docstrings.' --gguf 'D:\Models\coder.gguf'
+.\.venv\Scripts\python.exe main.py '.\example.py' --instruction 'Improve the docstrings.' --gguf '<path-to-your-model.gguf>'
 ```
 
 ## Run
 
 ```powershell
-.\.venv\Scripts\python.exe main.py 'C:\Projects\demo\example.py' --instruction 'Add a docstring to each function. Preserve behavior.'
+.\.venv\Scripts\python.exe main.py '.\example.py' --instruction 'Add a docstring to each function. Preserve behavior.'
 ```
 
 To use another installed model and customize generation:
@@ -309,7 +325,7 @@ For manual recovery, stop any active workflow, inspect the backup and current so
 use the actual timestamped backup name printed in the log:
 
 ```powershell
-Copy-Item -LiteralPath 'C:\Projects\demo\example.py.TIMESTAMP.ID.bak' -Destination 'C:\Projects\demo\example.py'
+Copy-Item -LiteralPath '.\example.py.TIMESTAMP.ID.bak' -Destination '.\example.py'
 ```
 
 A forced termination can leave a `.workflow.lock` or temporary file. Remove those only

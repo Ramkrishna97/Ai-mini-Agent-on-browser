@@ -110,12 +110,15 @@ BUILTINS = [
 
 
 class ToolRuntime:
-    def __init__(self, workspace: Path, *, browser=False, mcp=False, cancel_check=None, on_plan=None):
+    def __init__(self, workspace: Path, *, browser=False, mcp=False, cancel_check=None, on_plan=None,
+                 extra_skill_root="", extra_mcp_config=""):
         self.workspace = workspace
         self.browser_enabled = browser
         self.mcp_enabled = mcp
         self.cancel_check = cancel_check
         self.on_plan = on_plan
+        self.extra_skill_root = extra_skill_root
+        self.extra_mcp_config = extra_mcp_config
         self.stack = AsyncExitStack()
         self.mcp_clients = {}
         self.browser_driver = None
@@ -131,6 +134,8 @@ class ToolRuntime:
                 try:
                     await self.connect_mcp()
                 except Exception as exc:
+                    if self.extra_mcp_config:
+                        raise ValueError(f"Selected LM Studio MCP configuration could not connect: {describe_error(exc)}") from exc
                     LOG.warning("MCP unavailable; continuing with built-in tools: %s", describe_error(exc))
                     self.mcp_enabled = False
                     self.mcp_clients.clear()
@@ -151,6 +156,18 @@ class ToolRuntime:
             if not isinstance(extra, dict) or len(extra) > 5 or "local" in extra:
                 raise ValueError("mcp_servers.json needs an mcpServers object with at most 5 extra servers; 'local' is reserved.")
             servers.update(extra)
+        if self.extra_mcp_config:
+            config_path = Path(self.extra_mcp_config)
+            if config_path.is_symlink() or not config_path.is_file() or config_path.stat().st_size > 65536:
+                raise ValueError("Choose a regular LM Studio MCP JSON file under 64 KB.")
+            external = json.loads(config_path.read_text(encoding="utf-8-sig"))
+            extra = external.get("mcpServers")
+            if not isinstance(extra, dict) or len(extra) + len(servers) > 6:
+                raise ValueError("LM Studio MCP file needs mcpServers with at most five external servers total.")
+            for name, item in extra.items():
+                if name == "local" or name in servers:
+                    raise ValueError(f"Duplicate MCP server name: {name}")
+                servers[name] = item
         for server_name, item in servers.items():
             if not isinstance(server_name, str) or not server_name.isidentifier() or not isinstance(item, dict):
                 raise ValueError("Invalid MCP server name or configuration.")
@@ -224,9 +241,9 @@ class ToolRuntime:
             if error:
                 raise ValueError(f"Invalid {name} arguments: {error.message}")
         if name == "list_skills":
-            return list_skills(self.workspace)
+            return list_skills(self.workspace, self.extra_skill_root)
         if name == "load_skill":
-            return load_skill(self.workspace, arguments.get("name"))
+            return load_skill(self.workspace, arguments.get("name"), self.extra_skill_root)
         if name == "workspace_overview":
             return workspace_overview(self.workspace)
         if name == "set_plan":

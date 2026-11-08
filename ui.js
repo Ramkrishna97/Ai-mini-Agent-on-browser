@@ -1209,7 +1209,7 @@ async function poll() {
         sessionId = '';
         session = await request('/api/session');
       }
-      if (session.version !== 17) throw new Error('Restart the launcher to load the updated workflow server.');
+      if (session.version !== 19) throw new Error('Restart the launcher to load the updated workflow server.');
       token = session.token;
       sessionId = session.id;
       if (new URLSearchParams(location.search).get('session') !== sessionId)

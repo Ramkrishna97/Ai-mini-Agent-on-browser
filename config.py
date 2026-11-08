@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import time
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -36,12 +37,25 @@ class Settings:
     provider: str = "ollama"
     keep_alive: str | int = "10m"
     thinking_effort: str = "off"
+    extra_skill_root: str = ""
+    extra_mcp_config: str = ""
 
     def __post_init__(self) -> None:
         if self.provider not in {"ollama", "gguf", "npu", "lmstudio"}:
             raise ValueError("Model provider must be ollama, gguf, npu, or lmstudio.")
         if self.thinking_effort not in {"off", "low", "medium", "high"}:
             raise ValueError("Thinking effort must be off, low, medium, or high.")
+        for value, kind in ((self.extra_skill_root, "skill folder"), (self.extra_mcp_config, "MCP file")):
+            if value:
+                if self.provider != "lmstudio" or not isinstance(value, str) or len(value) > 1000:
+                    raise ValueError(f"The external {kind} is only available with LM Studio.")
+                path = Path(value)
+                if not path.is_absolute() or path.is_symlink() or not path.exists():
+                    raise ValueError(f"Choose an existing local {kind}.")
+                if kind == "skill folder" and not path.is_dir():
+                    raise ValueError("Choose an LM Studio skill folder.")
+                if kind == "MCP file" and (not path.is_file() or path.stat().st_size > 65536):
+                    raise ValueError("Choose an LM Studio MCP JSON file under 64 KB.")
         if self.provider in {"ollama", "lmstudio"}:
             url = urlparse(self.endpoint)
             if url.scheme not in {"http", "https"} or not url.hostname:

@@ -8,5 +8,7 @@ mcp_servers.json
 .sessions/
 plugins/vscode/node_modules/
 plugins/vscode/dist/
+plugins/vscode/backend/
+plugins/vscode/*.vsix
 plugins/intellij/.gradle/
 plugins/intellij/build/

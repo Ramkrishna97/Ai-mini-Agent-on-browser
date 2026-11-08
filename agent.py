@@ -162,6 +162,8 @@ async def run_agent(workspace: Path, instruction: str, settings, engine, approve
                  "served": False, "snapshot": False,
                  "console": False, "repair_cycles": 0, "nudges": 0, "error": ""}
     async with ToolRuntime(workspace, browser=browser, mcp=mcp, cancel_check=cancel_check,
+                           extra_skill_root=settings.extra_skill_root,
+                           extra_mcp_config=settings.extra_mcp_config,
                            on_plan=lambda plan: engine.notify("tool", plan=plan) if hasattr(engine, "notify") else None) as runtime:
         async def invoke_model(payload):
             if hasattr(engine, "chat_agent"):

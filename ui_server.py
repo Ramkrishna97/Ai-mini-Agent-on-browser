@@ -529,18 +529,20 @@ class JobState:
 
 
 class SessionStore:
-    """Independent conversations stored locally until explicitly deleted."""
+    """Process-local conversations by default; explicit folders support persistence tests."""
 
-    def __init__(self, folder=ROOT / ".sessions"):
-        self.folder = Path(folder)
-        self.folder.mkdir(parents=True, exist_ok=True)
+    def __init__(self, folder=None):
+        self.folder = Path(folder) if folder is not None else None
+        if self.folder is not None:
+            self.folder.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
         self.jobs = {}
+        self.records = {}
 
     def _path(self, session_id):
         if not isinstance(session_id, str) or not re.fullmatch(r"[0-9a-f]{32}", session_id):
             raise ValueError("Invalid conversation ID.")
-        return self.folder / f"{session_id}.json"
+        return self.folder / f"{session_id}.json" if self.folder is not None else None
 
     def create(self):
         session_id = secrets.token_hex(16)
@@ -553,9 +555,12 @@ class SessionStore:
         path = self._path(session_id)
         with self.lock:
             if session_id not in self.jobs:
-                if not path.is_file():
+                if self.folder is None:
+                    record = self.records.get(session_id)
+                else:
+                    record = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+                if record is None:
                     raise ValueError("Conversation not found. Start a new task.")
-                record = json.loads(path.read_text(encoding="utf-8"))
                 job = JobState(on_change=lambda state: self.save(session_id, state))
                 job.restore(record)
                 self.jobs[session_id] = job
@@ -568,22 +573,26 @@ class SessionStore:
             record = {"id": session_id, "updated": time.time(), "data": job.snapshot(),
                       "settings": asdict(job.chat_settings) if job.chat_settings else None,
                       "completed_context": job.completed_context}
-            path = self._path(session_id)
-            temporary = path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-            temporary.replace(path)
+            if self.folder is None:
+                self.records[session_id] = record
+            else:
+                path = self._path(session_id)
+                temporary = path.with_suffix(".tmp")
+                temporary.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+                temporary.replace(path)
         activity = getattr(self, "on_model_activity", None)
         if activity:
-            activity()
+            activity(job)
 
     def list(self):
         entries = []
         with self.lock:
-            for path in self.folder.glob("*.json"):
+            records = ((path.stem, path) for path in self.folder.glob("*.json")) if self.folder is not None else self.records.items()
+            for session_id, source in records:
                 try:
-                    record = json.loads(path.read_text(encoding="utf-8"))
+                    record = json.loads(source.read_text(encoding="utf-8")) if self.folder is not None else source
                     data = record.get("data", {})
-                    entries.append({"id": path.stem, "title": (data.get("request") or "New task")[:80],
+                    entries.append({"id": session_id, "title": (data.get("request") or "New task")[:80],
                                     "updated": record.get("updated", 0), "status": data.get("status", "idle")})
                 except (OSError, ValueError):
                     continue
@@ -595,9 +604,16 @@ class SessionStore:
             job = self.jobs.get(session_id)
             if job and job.worker_active:
                 raise ValueError("Stop the running task before deleting its conversation.")
-            if not path.is_file():
+            if self.folder is None:
+                present = session_id in self.records
+            else:
+                present = path.is_file()
+            if not present:
                 raise ValueError("Conversation not found.")
-            path.unlink()
+            if self.folder is None:
+                del self.records[session_id]
+            else:
+                path.unlink()
             self.jobs.pop(session_id, None)
 
     def any_active(self):
@@ -730,13 +746,122 @@ class OllamaPreloader:
                 return
 
 
+class LMStudioPreloader:
+    """Own only LM Studio instances explicitly loaded by this application."""
+
+    def __init__(self, active_check=None, loader=None, unloader=None):
+        from lmstudio_engine import load_model, unload_model
+        self.active_check = active_check or (lambda: False)
+        self.loader = loader or load_model
+        self.unloader = unloader or unload_model
+        self.lock = threading.Lock()
+        self.endpoint = ""
+        self.model = ""
+        self.context_length = 0
+        self.instance_id = ""
+        self.expires_at = 0.0
+        self.busy = False
+        self.phase = "off"
+        self.error = ""
+
+    def snapshot(self):
+        with self.lock:
+            return {"model": self.model, "context_length": self.context_length,
+                    "loaded": bool(self.instance_id), "busy": self.busy,
+                    "phase": self.phase, "error": self.error}
+
+    def matches(self, endpoint, model, context_length):
+        from lmstudio_engine import base_url
+        with self.lock:
+            return (bool(self.instance_id) and not self.busy and self.endpoint == base_url(endpoint)
+                    and self.model == model and self.context_length == context_length)
+
+    def touch(self, job):
+        if job.chat_settings and job.chat_settings.provider == "lmstudio":
+            from lmstudio_engine import base_url
+            with self.lock:
+                if self.instance_id and self.endpoint == base_url(job.chat_settings.endpoint):
+                    self.expires_at = time.monotonic() + MODEL_IDLE_SECONDS
+
+    def select(self, endpoint, model, context_length):
+        from lmstudio_engine import base_url
+        if type(context_length) is not int:
+            raise ValueError("Choose a numeric LM Studio context length.")
+        if not isinstance(model, str) or not 0 < len(model.strip()) <= 200:
+            raise ValueError("Choose an LM Studio model.")
+        Settings(provider="lmstudio", endpoint=endpoint, model_name=model.strip(), context_tokens=context_length)
+        if not 16384 <= context_length <= 262144:
+            raise ValueError("LM Studio agent context must be between 16384 and 262144 tokens.")
+        endpoint, model = base_url(endpoint), model.strip()
+        with self.lock:
+            if self.busy:
+                raise ValueError("Wait for LM Studio model loading to finish.")
+            if (self.instance_id and self.endpoint == endpoint and self.model == model
+                    and self.context_length == context_length):
+                self.expires_at = time.monotonic() + MODEL_IDLE_SECONDS
+                return
+            previous = (self.endpoint, self.instance_id) if self.instance_id else None
+            self.busy = True
+            self.phase = "loading"
+            self.error = ""
+        threading.Thread(target=self._load, args=(endpoint, model, context_length, previous),
+                         daemon=True, name="lmstudio-load").start()
+
+    def _load(self, endpoint, model, context_length, previous):
+        try:
+            if previous:
+                self.unloader(*previous)
+                with self.lock:
+                    self.instance_id = ""
+            instance_id = self.loader(endpoint, model, context_length)
+            with self.lock:
+                self.endpoint, self.model = endpoint, model
+                self.context_length, self.instance_id = context_length, instance_id
+                self.expires_at = time.monotonic() + MODEL_IDLE_SECONDS
+                self.phase = "ready"
+        except Exception as exc:
+            with self.lock:
+                self.phase = "error"
+                self.error = describe_error(exc)
+        finally:
+            with self.lock:
+                self.busy = False
+
+    def expire(self, now=None):
+        now = time.monotonic() if now is None else now
+        with self.lock:
+            if not self.instance_id or self.busy or now < self.expires_at or self.active_check():
+                return False
+            endpoint, instance_id = self.endpoint, self.instance_id
+            self.busy = True
+            self.phase = "unloading"
+        def unload():
+            try:
+                self.unloader(endpoint, instance_id)
+                with self.lock:
+                    if self.instance_id == instance_id:
+                        self.instance_id = ""
+                        self.phase = "off"
+            except Exception as exc:
+                with self.lock:
+                    self.phase = "error"
+                    self.error = describe_error(exc)
+                    self.expires_at = time.monotonic() + 60
+            finally:
+                with self.lock:
+                    self.busy = False
+        threading.Thread(target=unload, daemon=True, name="lmstudio-unload").start()
+        return True
+
+
 class Server(ThreadingHTTPServer):
     def __init__(self, address):
         super().__init__(address, Handler)
         self.token = secrets.token_urlsafe(32)
         self.sessions = SessionStore()
         self.preloader = OllamaPreloader(active_check=self.sessions.any_active)
-        self.sessions.on_model_activity = self.preloader.touch
+        self.lmstudio_preloader = LMStudioPreloader(active_check=self.sessions.any_active)
+        self.sessions.on_model_activity = lambda job: (self.preloader.touch(), self.lmstudio_preloader.touch(job))
         self.dialog_lock = threading.Lock()
         self.origin = f"http://127.0.0.1:{self.server_port}"
         self._reaper_stop = threading.Event()
@@ -746,9 +871,12 @@ class Server(ThreadingHTTPServer):
     def _reap_idle_models(self):
         while not self._reaper_stop.wait(5):
             self.sessions.expire_idle_engines()
+            self.lmstudio_preloader.expire()
 
     def server_close(self):
         self._reaper_stop.set()
+        if not self.sessions.any_active():
+            self.lmstudio_preloader.expire(float("inf"))
         super().server_close()
 
 
@@ -797,14 +925,14 @@ class Handler(BaseHTTPRequestHandler):
             filename, mime = assets[route.path]
             self.respond(200, (ROOT / filename).read_bytes(), mime + "; charset=utf-8")
         elif route.path == "/api/health":
-            self.respond(200, {"application": "local-workflow", "version": 17,
+            self.respond(200, {"application": "local-workflow", "version": 19,
                                "idle_offload_seconds": MODEL_IDLE_SECONDS})
         elif route.path == "/api/session":
             try:
                 requested = parse_qs(route.query).get("id", [""])[0]
                 session_id = requested or self.server.sessions.create()
                 self.server.sessions.get(session_id)
-                self.respond(200, {"token": self.server.token, "application": "local-workflow", "version": 17,
+                self.respond(200, {"token": self.server.token, "application": "local-workflow", "version": 19,
                                    "id": session_id, "workspace": str(ROOT), "default_name": "generated-project",
                                    "idle_offload_seconds": MODEL_IDLE_SECONDS})
             except (ValueError, OSError) as exc:
@@ -814,7 +942,8 @@ class Handler(BaseHTTPRequestHandler):
         elif route.path == "/api/status":
             try:
                 job = self.server.sessions.get(self.headers.get("X-Session-Id", ""))
-                self.respond(200, {**job.snapshot(), "model_preload": self.server.preloader.snapshot()})
+                self.respond(200, {**job.snapshot(), "model_preload": self.server.preloader.snapshot(),
+                                   "lmstudio_preload": self.server.lmstudio_preloader.snapshot()})
             except (ValueError, OSError) as exc:
                 self.respond(404, {"error": str(exc)})
         elif route.path == "/api/models":
@@ -834,7 +963,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.local_request():
             return
-        if self.path not in {"/api/run", "/api/chat", "/api/choose-file", "/api/preview", "/api/suggestions", "/api/cancel", "/api/output", "/api/approve", "/api/model/load", "/api/model/offload", "/api/lmstudio/models", "/api/npu/import", "/api/sessions", "/api/sessions/delete", "/api/workspace/list", "/api/workspace/read"}:
+        if self.path not in {"/api/run", "/api/chat", "/api/choose-file", "/api/preview", "/api/suggestions", "/api/cancel", "/api/output", "/api/approve", "/api/model/load", "/api/model/offload", "/api/lmstudio/models", "/api/lmstudio/load", "/api/npu/import", "/api/sessions", "/api/sessions/delete", "/api/workspace/list", "/api/workspace/read"}:
             self.respond(404, {"error": "Not found."})
             return
         if not secrets.compare_digest(self.headers.get("X-Workflow-Token", ""), self.server.token):
@@ -859,6 +988,15 @@ class Handler(BaseHTTPRequestHandler):
                 endpoint = str(payload.get("endpoint") or "http://localhost:1234")
                 Settings(provider="lmstudio", endpoint=endpoint)
                 self.respond(200, {"models": list_models(endpoint)})
+                return
+            if self.path == "/api/lmstudio/load":
+                if self.server.sessions.any_active():
+                    self.respond(409, {"error": "Wait for the current workflow to finish before changing models."})
+                    return
+                self.server.lmstudio_preloader.select(
+                    str(payload.get("endpoint") or "http://localhost:1234"), payload.get("model"),
+                    payload.get("context_tokens"))
+                self.respond(202, self.server.lmstudio_preloader.snapshot())
                 return
             if self.path == "/api/sessions":
                 self.respond(201, {"id": self.server.sessions.create()})
@@ -986,9 +1124,18 @@ class Handler(BaseHTTPRequestHandler):
                                     endpoint=str(payload.get("endpoint") or ("http://localhost:1234" if provider == "lmstudio" else Settings().endpoint)),
                                     max_tokens=max_tokens, context_tokens=context_tokens,
                                     chunk_chars=1000 if provider == "npu" else 6000,
-                                    keep_alive="10m", thinking_effort=payload.get("thinking_effort", "off"))
+                                    keep_alive="10m", thinking_effort=payload.get("thinking_effort", "off"),
+                                    extra_skill_root=payload.get("extra_skill_root", ""),
+                                    extra_mcp_config=payload.get("extra_mcp_config", ""))
             if settings and provider == "ollama" and self.server.preloader.snapshot()["busy"]:
                 self.respond(409, {"error": "Wait for the selected Ollama model to finish loading."})
+                return
+            if settings and provider == "lmstudio" and self.server.lmstudio_preloader.snapshot()["busy"]:
+                self.respond(409, {"error": "Wait for the selected LM Studio model to finish loading."})
+                return
+            if settings and provider == "lmstudio" and not self.server.lmstudio_preloader.matches(
+                    settings.endpoint, settings.model_name, settings.context_tokens):
+                self.respond(409, {"error": "Load this LM Studio model with the selected context before sending."})
                 return
             if job.snapshot()["conversation"]:
                 self.respond(409, {"error": "This conversation is saved. Start a new task to keep its history."})
@@ -1072,6 +1219,18 @@ def ensure_ollama():
     raise RuntimeError("Ollama did not become ready. Open Ollama from the Start menu, then launch again.")
 
 
+def clear_legacy_sessions():
+    """Remove only old app-owned session records when a new backend starts."""
+    folder = ROOT / ".sessions"
+    if not folder.is_dir() or folder.is_symlink():
+        return
+    for entry in folder.iterdir():
+        if (entry.is_file() and not entry.is_symlink()
+                and entry.suffix in {".json", ".tmp"}
+                and re.fullmatch(r"[0-9a-f]{32}", entry.stem)):
+            entry.unlink()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local browser UI for deterministic Ollama file edits")
     parser.add_argument("--port", type=int, default=8765)
@@ -1087,7 +1246,7 @@ def main():
             with urlopen(f"http://127.0.0.1:{args.port}/api/session", timeout=2) as response:
                 previous = json.load(response)
             if previous.get("application") == "local-workflow":
-                if previous.get("version") != 17:
+                if previous.get("version") != 19:
                     parser.exit(1, "An older Local Workflow server is still running. Run stop.bat, then start.bat.\n")
                 if not args.no_browser:
                     webbrowser.open(f"http://127.0.0.1:{args.port}")
@@ -1098,6 +1257,7 @@ def main():
         if args.ensure_ollama:
             ensure_ollama()
         with Server(("127.0.0.1", args.port)) as server:
+            clear_legacy_sessions()
             print(f"Open {server.origin} in your browser. Press Ctrl+C to stop.", flush=True)
             if not args.no_browser:
                 webbrowser.open(server.origin)
