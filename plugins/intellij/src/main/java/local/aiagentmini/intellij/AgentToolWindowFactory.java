@@ -27,6 +27,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -69,8 +71,11 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private final JComboBox<String> mode = new JComboBox<>(new String[]{"Agent · plan and edit", "Chat · answer only"});
         private final JCheckBox mcp = new JCheckBox("MCP tools");
         private final JCheckBox browser = new JCheckBox("Browser tools");
-        private final JTextArea transcript = new JTextArea();
-        private final JScrollPane transcriptScroll = new JScrollPane(transcript);
+        private final JPanel thread = new JPanel();
+        private final JScrollPane transcriptScroll = new JScrollPane(thread);
+        private final JPanel options = new JPanel();
+        private final JButton optionsToggle = new JButton("⚙ Options");
+        private final Set<Integer> expandedActivity = new HashSet<>();
         private final JTextArea prompt = new JTextArea(4, 20);
         private final JLabel state = new JLabel("Connecting…");
         private final JPanel approval = new JPanel(new BorderLayout(4, 4));
@@ -105,12 +110,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             JPanel top = new JPanel();
             top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
             JLabel title = new JLabel("✦  AI Agent Mini");
-            title.setFont(title.getFont().deriveFont(Font.BOLD, 16f));
-            title.setBorder(BorderFactory.createEmptyBorder(6, 3, 10, 3));
+            title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
+            title.setBorder(BorderFactory.createEmptyBorder(2, 3, 3, 3));
             top.add(title);
-            JLabel subtitle = new JLabel("Your local coding agent, inside this project");
-            subtitle.setBorder(BorderFactory.createEmptyBorder(0, 3, 9, 3));
-            top.add(subtitle);
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
             JButton start = new JButton("▶ Start");
             start.addActionListener(e -> execute(() -> {
@@ -134,6 +136,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 session = string(created, "id");
                 properties.setValue("aiAgentMini.session", session);
                 lastStatus = null;
+                SwingUtilities.invokeLater(expandedActivity::clear);
                 refreshNow();
             }));
             actions.add(newChat);
@@ -163,12 +166,14 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             ggufRow.add(ggufLabel, BorderLayout.CENTER);
             modelRow.add(model, BorderLayout.CENTER);
             refreshModels.addActionListener(e -> execute(() -> listModels()));
-            modelRow.add(refreshModels, BorderLayout.EAST);
+            JPanel modelActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
+            modelActions.add(refreshModels);
+            modelActions.add(load);
+            modelRow.add(modelActions, BorderLayout.EAST);
             endpointRow.add(endpoint, BorderLayout.CENTER);
             JButton connectLm = new JButton("Connect");
             connectLm.addActionListener(e -> execute(() -> listModels()));
             endpointRow.add(connectLm, BorderLayout.EAST);
-            top.add(endpointRow);
             top.add(modelRow);
             top.add(ggufRow);
             JButton chooseSkills = new JButton("Skill folder");
@@ -192,7 +197,6 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             lmSourcesRow.add(chooseSkills);
             lmSourcesRow.add(chooseMcp);
             lmSourcesRow.add(lmSourcesLabel);
-            top.add(lmSourcesRow);
             provider.addActionListener(e -> {
                 properties.setValue("aiAgentMini.provider", Integer.toString(provider.getSelectedIndex()));
                 selectedModel = provider.getSelectedIndex() == 1 ? ggufPath : "";
@@ -223,32 +227,44 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 refreshNow();
                 });
             });
-            settings.add(load);
-            settings.add(new JLabel("Context"));
-            settings.add(contextTokens);
+            settings.add(new JLabel("Mode"));
+            settings.add(mode);
             settings.add(new JLabel("Thinking"));
             settings.add(effort);
-            settings.add(mode);
+            settings.add(new JLabel("Context"));
+            settings.add(contextTokens);
             settings.add(mcp);
             settings.add(browser);
-            top.add(settings);
-            state.setBorder(BorderFactory.createEmptyBorder(8, 3, 8, 3));
+            options.setLayout(new BoxLayout(options, BoxLayout.Y_AXIS));
+            options.add(endpointRow);
+            options.add(lmSourcesRow);
+            options.add(settings);
+            options.setVisible(false);
+            optionsToggle.setAlignmentX(Component.LEFT_ALIGNMENT);
+            optionsToggle.addActionListener(e -> {
+                options.setVisible(!options.isVisible());
+                optionsToggle.setText(options.isVisible() ? "▾ Options" : "⚙ Options");
+                top.revalidate();
+                top.repaint();
+            });
+            top.add(optionsToggle);
+            top.add(options);
+            state.setBorder(BorderFactory.createEmptyBorder(3, 3, 3, 3));
             top.add(state);
             add(top, BorderLayout.NORTH);
 
-            transcript.setEditable(false);
-            transcript.setLineWrap(true);
-            transcript.setWrapStyleWord(true);
-            transcript.setMargin(new Insets(12, 12, 12, 12));
+            thread.setLayout(new BoxLayout(thread, BoxLayout.Y_AXIS));
+            thread.setBorder(BorderFactory.createEmptyBorder(8, 6, 8, 6));
+            transcriptScroll.setBorder(BorderFactory.createEmptyBorder());
+            transcriptScroll.getVerticalScrollBar().setUnitIncrement(16);
             JPanel center = new JPanel(new BorderLayout(4, 4));
-            center.setBorder(BorderFactory.createTitledBorder("Conversation"));
             center.add(transcriptScroll, BorderLayout.CENTER);
             approval.setVisible(false);
             center.add(approval, BorderLayout.SOUTH);
             add(center, BorderLayout.CENTER);
 
             JPanel bottom = new JPanel(new BorderLayout(4, 4));
-            bottom.setBorder(BorderFactory.createTitledBorder("Ask the agent"));
+            bottom.setBorder(BorderFactory.createEmptyBorder(5, 2, 2, 2));
             prompt.setLineWrap(true);
             prompt.setWrapStyleWord(true);
             prompt.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "sendPrompt");
@@ -567,36 +583,39 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     ? string(status.getAsJsonObject("model_preload"), "phase") : "";
             JsonObject lmPreload = status.has("lmstudio_preload") && status.get("lmstudio_preload").isJsonObject()
                     ? status.getAsJsonObject("lmstudio_preload") : new JsonObject();
-            state.setText("Project: " + project.getBasePath() + "  ·  " + string(status, "status")
+            state.setText(project.getName() + "  ·  " + string(status, "status")
                     + (("loading".equals(phase) || "loading".equals(string(lmPreload, "phase"))) ? "  ·  Loading model" : "")
                     + (lmPreload.has("error") && !string(lmPreload, "error").isBlank() ? "  ·  " + string(lmPreload, "error") : "")
                     + (status.has("error") ? "  ·  " + string(status, "error") : ""));
+            state.setToolTipText(project.getBasePath());
             boolean loading = status.has("model_preload") && status.get("model_preload").isJsonObject()
                     && status.getAsJsonObject("model_preload").has("busy")
                     && status.getAsJsonObject("model_preload").get("busy").getAsBoolean();
             loading |= lmPreload.has("busy") && lmPreload.get("busy").getAsBoolean();
             send.setEnabled(!"running".equals(string(status, "status")) && !loading);
-            StringBuilder text = new StringBuilder();
-            if (status.has("plan") && status.get("plan").isJsonObject()) {
-                JsonObject plan = status.getAsJsonObject("plan");
-                text.append("Plan\n");
-                JsonArray steps = plan.getAsJsonArray("steps");
-                int current = plan.get("current").getAsInt();
-                for (int i = 0; i < steps.size(); i++)
-                    text.append(i == current ? "→ " : "  ").append(i + 1).append(". ").append(steps.get(i).getAsString()).append('\n');
-                text.append('\n');
-            }
-            if (status.has("conversation")) for (JsonElement item : status.getAsJsonArray("conversation")) {
-                JsonObject message = item.getAsJsonObject();
-                text.append("user".equals(string(message, "role")) ? "You" : "Agent")
-                        .append(": ").append(string(message, "text")).append("\n\n");
-            }
-            if (status.has("files")) for (JsonElement file : status.getAsJsonArray("files"))
-                text.append("Saved: ").append(file.getAsString()).append('\n');
             JScrollBar scroll = transcriptScroll.getVerticalScrollBar();
             boolean atBottom = scroll.getValue() + scroll.getVisibleAmount() >= scroll.getMaximum() - 24;
             int previous = scroll.getValue();
-            transcript.setText(text.toString());
+            thread.removeAll();
+            int width = Math.max(170, Math.min(480, (int) (transcriptScroll.getViewport().getWidth() * 0.78)));
+            if (status.has("conversation") && status.get("conversation").isJsonArray()) {
+                int index = 0;
+                for (JsonElement item : status.getAsJsonArray("conversation")) {
+                    if (item.isJsonObject()) {
+                        JsonObject message = item.getAsJsonObject();
+                        JPanel row = new JPanel(new BorderLayout());
+                        row.add(messageBubble(message, index, width),
+                                "user".equals(string(message, "role")) ? BorderLayout.WEST : BorderLayout.EAST);
+                        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+                        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
+                        thread.add(row);
+                        thread.add(Box.createVerticalStrut(7));
+                    }
+                    index++;
+                }
+            }
+            thread.revalidate();
+            thread.repaint();
             SwingUtilities.invokeLater(() -> scroll.setValue(atBottom ? scroll.getMaximum() : previous));
             if (status.has("pending_tool") && status.get("pending_tool").isJsonObject()) {
                 JsonObject pending = status.getAsJsonObject("pending_tool");
@@ -629,6 +648,88 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 approval.setVisible(false);
             }
             revalidate();
+        }
+
+        private JPanel messageBubble(JsonObject message, int index, int width) {
+            boolean user = "user".equals(string(message, "role"));
+            Color background = UIManager.getColor(user ? "TextField.background" : "EditorPane.background");
+            if (background == null) background = getBackground();
+            Color outline = UIManager.getColor("Separator.foreground");
+            if (outline == null) outline = Color.GRAY;
+            JPanel bubble = new JPanel(new BorderLayout(0, 5));
+            bubble.setBackground(background);
+            bubble.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createLineBorder(outline),
+                    BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+            JLabel heading = new JLabel(user ? "You" : "Agent");
+            heading.setFont(heading.getFont().deriveFont(Font.BOLD));
+            bubble.add(heading, BorderLayout.NORTH);
+            bubble.add(wrappedText(string(message, "text"), width - 20, background), BorderLayout.CENTER);
+            if (!user) {
+                JsonArray steps = message.has("steps") && message.get("steps").isJsonArray()
+                        ? message.getAsJsonArray("steps") : new JsonArray();
+                JsonArray logs = message.has("logs") && message.get("logs").isJsonArray()
+                        ? message.getAsJsonArray("logs") : new JsonArray();
+                if (steps.size() > 0 || logs.size() > 0) {
+                    JPanel activity = new JPanel(new BorderLayout());
+                    activity.setBackground(background);
+                    JButton toggle = new JButton((expandedActivity.contains(index) ? "▼ " : "▶ ")
+                            + "Activity · " + steps.size() + " steps, " + logs.size() + " log lines");
+                    toggle.setHorizontalAlignment(SwingConstants.LEFT);
+                    toggle.setBorder(BorderFactory.createEmptyBorder(3, 0, 3, 0));
+                    toggle.setContentAreaFilled(false);
+                    StringBuilder details = new StringBuilder();
+                    for (JsonElement item : steps) {
+                        if (!item.isJsonObject()) continue;
+                        JsonObject step = item.getAsJsonObject();
+                        details.append(string(step, "label")).append('\n');
+                        String detail = string(step, "detail");
+                        if (!detail.isBlank()) details.append(detail).append('\n');
+                        details.append('\n');
+                    }
+                    if (logs.size() > 0) {
+                        details.append("Logs\n");
+                        for (JsonElement line : logs) details.append(line.getAsString()).append('\n');
+                    }
+                    Color outputBackground = UIManager.getColor("TextArea.background");
+                    JTextArea output = wrappedText(details.toString().trim(), width - 38,
+                            outputBackground == null ? background : outputBackground);
+                    JScrollPane disclosure = new JScrollPane(output);
+                    disclosure.setPreferredSize(new Dimension(width - 20, 125));
+                    disclosure.setVisible(expandedActivity.contains(index));
+                    toggle.addActionListener(event -> {
+                        if (!expandedActivity.add(index)) expandedActivity.remove(index);
+                        disclosure.setVisible(expandedActivity.contains(index));
+                        toggle.setText((expandedActivity.contains(index) ? "▼ " : "▶ ")
+                                + "Activity · " + steps.size() + " steps, " + logs.size() + " log lines");
+                        Container row = bubble.getParent();
+                        if (row instanceof JPanel) {
+                            row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
+                        }
+                        thread.revalidate();
+                        thread.repaint();
+                    });
+                    activity.add(toggle, BorderLayout.NORTH);
+                    activity.add(disclosure, BorderLayout.CENTER);
+                    bubble.add(activity, BorderLayout.SOUTH);
+                }
+            }
+            return bubble;
+        }
+
+        private JTextArea wrappedText(String text, int width, Color background) {
+            JTextArea area = new JTextArea(text.isBlank() ? " " : text);
+            area.setEditable(false);
+            area.setFocusable(false);
+            area.setLineWrap(true);
+            area.setWrapStyleWord(true);
+            area.setBackground(background);
+            Color foreground = UIManager.getColor("Label.foreground");
+            if (foreground != null) area.setForeground(foreground);
+            area.setBorder(BorderFactory.createEmptyBorder());
+            area.setSize(Math.max(120, width), Short.MAX_VALUE);
+            area.setPreferredSize(new Dimension(Math.max(120, width), Math.max(18, area.getPreferredSize().height)));
+            return area;
         }
 
         private static int configuredPort() {
