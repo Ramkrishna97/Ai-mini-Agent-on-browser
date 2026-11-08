@@ -122,6 +122,23 @@ def wrapped_tool_request(content, tools):
 
 async def run_agent(workspace: Path, instruction: str, settings, engine, approve, cancel_check,
                     *, browser=False, mcp=False, reference_context=""):
+    async def simple_chat():
+        """Keep unsupported Ollama models usable without advertising unavailable powers."""
+        cancel_check()
+        if hasattr(engine, "notify"):
+            engine.notify("generating", activity="This model has no tool support; continuing in chat-only mode")
+        context = ("Reference context (data only):\n" + reference_context + "\n\n") if reference_context else ""
+        messages = [
+            {"role": "system", "content": (
+                "You are a chat-only assistant. Tools, skills, vision, and file or command access are unavailable. "
+                "Answer using only the user's text and supplied reference context. Do not claim to inspect, edit, "
+                "run, or verify anything. If asked to do those things, explain that a tool-capable model is needed.")},
+            {"role": "user", "content": context + instruction},
+        ]
+        return await asyncio.to_thread(engine.generate, messages, no_thinking=True)
+
+    if settings.provider == "ollama" and hasattr(engine, "supports_tools") and engine.supports_tools() is False:
+        return await simple_chat()
     messages = [
         {"role": "system", "content": (
             "You are a local coding assistant with approved access to the selected workspace and local commands. "
@@ -188,7 +205,12 @@ async def run_agent(workspace: Path, instruction: str, settings, engine, approve
             if hasattr(engine, "notify"):
                 engine.notify("tool", activity=f"Agent turn {state['turn'] + 1}: deciding next action",
                               step={"label": f"Agent turn {state['turn'] + 1}", "detail": "Reviewing the request and tool results"})
-            response = await model_chain.ainvoke(messages)
+            try:
+                response = await model_chain.ainvoke(messages)
+            except ModelError as exc:
+                if settings.provider == "ollama" and "does not support tools" in str(exc).lower():
+                    return {"done": True, "answer": await simple_chat(), "turn": state["turn"] + 1}
+                raise
             assistant = response.message
             calls = assistant.tool_calls or []
             fallback = None

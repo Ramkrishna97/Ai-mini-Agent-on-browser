@@ -101,7 +101,7 @@ let attachments = [];
 let followupMode = false, newTaskDraft = false, chatReady = false;
 let conversationModel = '';
 let hasConversation = false;
-let restoredSession = false, preferredModel = '';
+let restoredSession = false, preferredModel = '', modelDraftDirty = false;
 let generationWasRunning = false;
 let modelLoading = false, modelRequestChain = Promise.resolve();
 let modelResidency = {selected: '', loaded: '', busy: false, phase: 'off', error: ''};
@@ -220,6 +220,7 @@ function updateControls() {
   $('#run').disabled = !instruction.value.trim() || (!followupMode && (!preview || (preview.needs_model &&
     (ollama ? (!modelSelect.value || loadingModels || modelLoading) : npu ? (!npuModelSelect.value || loadingNpuModels) : !ggufPath.value))));
   $('#refresh-models').disabled = loadingModels;
+  $('#save-model').disabled = !connected || running || submitting || choosing || loadingModels || modelLoading || !modelSelect.value;
   $('#offload-model').disabled = !connected || running || submitting || choosing || (!modelSelect.value && !modelResidency.loaded && !modelResidency.busy);
   $('#cancel').hidden = !(running || submitting);
   $('#cancel').disabled = cancelRequested;
@@ -360,8 +361,6 @@ providerSelect.addEventListener('change', () => {
   lastProvider = providerSelect.value;
   if (ollama && !modelsLoaded) loadModels();
   if (npu && !npuModelsLoaded) loadNpuModels();
-  if (ollama && modelSelect.value) requestModelChange(modelSelect.value);
-  if (!ollama && (modelResidency.loaded || modelResidency.busy)) requestModelChange('');
   schedulePreview();
 });
 
@@ -469,13 +468,20 @@ function requestModelChange(model) {
 }
 
 modelSelect.addEventListener('change', () => {
-  if (providerSelect.value === 'ollama') requestModelChange(modelSelect.value);
+  modelDraftDirty = true;
   updateControls();
+});
+$('#save-model').addEventListener('click', () => {
+  if (!modelSelect.value) return;
+  preferredModel = modelSelect.value;
+  modelDraftDirty = false;
+  requestModelChange(modelSelect.value);
 });
 $('#offload-model').addEventListener('click', () => {
   requestModelChange('');
   modelSelect.value = '';
   preferredModel = '';
+  modelDraftDirty = false;
   updateControls();
 });
 
@@ -613,7 +619,7 @@ async function loadModels() {
   if (loadingModels || providerSelect.value !== 'ollama') return;
   loadingModels = true;
   updateControls();
-  const previous = preferredModel || modelSelect.value;
+  const previous = modelSelect.value || preferredModel;
   $('#model-hint').textContent = 'Loading installed models from Ollama…';
   try {
     const data = await request('/api/models');
@@ -1028,12 +1034,12 @@ function render(data) {
     if (data.context_tokens != null) $('#context_tokens').value = data.context_tokens;
     updateComposerLimits();
     if (data.path) pathInput.value = data.path;
-    if (data.provider === 'ollama' && modelsLoaded && modelSelect.options.length) modelSelect.value = preferredModel;
+    if (data.provider === 'ollama' && modelsLoaded && modelSelect.options.length && !modelDraftDirty) modelSelect.value = preferredModel;
   }
   if (data.model_preload && !modelRequestPending) {
     if (data.model_preload.selected) {
       preferredModel = data.model_preload.selected;
-      if (modelsLoaded && [...modelSelect.options].some(option => option.value === preferredModel)) modelSelect.value = preferredModel;
+      if (!modelDraftDirty && modelsLoaded && [...modelSelect.options].some(option => option.value === preferredModel)) modelSelect.value = preferredModel;
     } else if (data.model_preload.cleared) {
       preferredModel = '';
       modelSelect.value = '';

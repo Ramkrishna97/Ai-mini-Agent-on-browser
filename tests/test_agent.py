@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 from agent import json_tool_request, json_tool_requests, mcp_result_data, run_agent, wrapped_tool_request
 from agent_tools import CORE_MANIFEST, ToolRuntime, validate_local_mcp_url
 import agent_tools
-from config import Settings
+from config import OllamaEngine, Settings
 from config import ModelError
 from ui_server import JobState
 
@@ -36,6 +36,55 @@ class FakeClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_ollama_without_tools_uses_plain_chat_without_thinking_or_runtime(self):
+        calls = []
+
+        class NoToolsClient:
+            def show(self, _model):
+                return SimpleNamespace(capabilities=["completion"])
+
+            def chat(self, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(message=SimpleNamespace(content="I can explain this, but cannot edit files."),
+                                       done_reason="stop", eval_count=5, eval_duration=1_000_000)
+
+        with TemporaryDirectory() as folder:
+            settings = Settings(model_name="gemma3:1b", thinking_effort="high")
+            engine = OllamaEngine(settings, client=NoToolsClient())
+            with patch.object(ToolRuntime, "__aenter__", side_effect=AssertionError("Tools must stay disabled")):
+                answer = asyncio.run(run_agent(Path(folder), "Edit my file", settings, engine,
+                                               lambda *_: True, lambda: None, mcp=True, browser=True))
+        self.assertIn("cannot edit", answer)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("tools", calls[0])
+        self.assertIs(calls[0]["think"], False)
+        self.assertEqual([message["role"] for message in calls[0]["messages"]], ["system", "user"])
+
+    def test_ollama_tool_rejection_retries_as_plain_chat(self):
+        calls = []
+
+        class RejectingClient:
+            def show(self, _model):
+                return SimpleNamespace(capabilities=None)
+
+            def chat(self, **kwargs):
+                calls.append(kwargs)
+                if "tools" in kwargs:
+                    raise RuntimeError("registry.ollama.ai/library/gemma3:1b does not support tools (status code: 400)")
+                return SimpleNamespace(message=SimpleNamespace(content="Chat answer."), done_reason="stop",
+                                       eval_count=3, eval_duration=1_000_000)
+
+        with TemporaryDirectory() as folder:
+            settings = Settings(model_name="gemma3:1b", thinking_effort="low")
+            engine = OllamaEngine(settings, client=RejectingClient())
+            answer = asyncio.run(run_agent(Path(folder), "Hi", settings, engine,
+                                           lambda *_: True, lambda: None))
+        self.assertEqual(answer, "Chat answer.")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("tools", calls[0])
+        self.assertNotIn("tools", calls[1])
+        self.assertIs(calls[1]["think"], False)
+
     def test_local_http_mcp_url_rejects_non_loopback(self):
         for url in ("https://127.0.0.1:3001/mcp", "http://example.com:3001/mcp",
                     "http://127.0.0.1/mcp", "http://user:pass@127.0.0.1:3001/mcp"):

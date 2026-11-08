@@ -149,7 +149,8 @@ class OllamaEngine:
         except Exception as exc:
             raise ModelError(f"Ollama health check failed at {self.settings.endpoint}: {exc}") from exc
 
-    def generate(self, messages: list[dict[str, str]], *, json_output: bool = False) -> str:
+    def generate(self, messages: list[dict[str, str]], *, json_output: bool = False,
+                 no_thinking: bool = False) -> str:
         """One independent turn; stream to the UI when a progress callback is supplied."""
         try:
             streaming = self.progress is not None
@@ -158,7 +159,7 @@ class OllamaEngine:
                 model=self.settings.model_name,
                 messages=messages,
                 stream=streaming,
-                think=False if self.settings.thinking_effort == "off" else self.settings.thinking_effort,
+                think=False if no_thinking or self.settings.thinking_effort == "off" else self.settings.thinking_effort,
                 **({"format": "json"} if json_output else {}),
                 keep_alive=self.settings.keep_alive,
                 options={
@@ -207,6 +208,14 @@ class OllamaEngine:
             raise
         except Exception as exc:
             raise ModelError(f"Ollama generation failed: {exc}") from exc
+
+    def supports_tools(self) -> bool | None:
+        """Return an advertised capability, or unknown for older Ollama servers."""
+        try:
+            capabilities = self.client.show(self.settings.model_name).capabilities
+            return "tools" in capabilities if capabilities else None
+        except Exception:
+            return None
 
     def chat_agent(self, messages, tools):
         """Stream visible answer text while retaining tool calls for the next turn."""

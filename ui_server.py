@@ -192,8 +192,9 @@ class JobState:
             self.data["pending_tool"] = None
             return self.approval_decision
 
-    def start(self, path, instruction, settings, name, *, agent_mode=False, browser=False, mcp=False, attachments=None):
-        plan = None if agent_mode else plan_request(path, instruction, name=name)
+    def start(self, path, instruction, settings, name, *, agent_mode=False, chat_only=False,
+              browser=False, mcp=False, attachments=None):
+        plan = None if agent_mode or chat_only else plan_request(path, instruction, name=name)
         with self.lock:
             if self.worker_active:
                 return False
@@ -206,7 +207,8 @@ class JobState:
             self.chat_settings = settings
             self.completed_context = None
             self.data = {"status": "running", "logs": [], "backup": "", "backups": [], "files": [], "agent_steps": [],
-                         "commands": [], "error": "", "path": path, "mode": "agent" if agent_mode else plan.action, "generation": {},
+                         "commands": [], "error": "", "path": path,
+                         "mode": "agent" if agent_mode else "chat" if chat_only else plan.action, "generation": {},
                          "pending_tool": None, "always_allow_all": self.data.get("always_allow_all", False), "answer": "",
                          "request": instruction, "model": settings.model_name if settings else "",
                          "provider": settings.provider if settings else "", "agent_mode": agent_mode,
@@ -224,7 +226,8 @@ class JobState:
             except Exception as exc:
                 logging.getLogger("workflow").warning("Previous model cleanup failed: %s", describe_error(exc))
         self.persist()
-        worker = threading.Thread(target=self.run, args=(path, instruction, settings, name, agent_mode, browser, mcp, attachments or []), daemon=False)
+        worker = threading.Thread(target=self.run, args=(path, instruction, settings, name, agent_mode,
+                                                        chat_only, browser, mcp, attachments or []), daemon=False)
         try:
             worker.start()
         except Exception:
@@ -236,7 +239,7 @@ class JobState:
             raise
         return True
 
-    def run(self, path, instruction, settings, name, agent_mode, browser, mcp, attachments):
+    def run(self, path, instruction, settings, name, agent_mode, chat_only, browser, mcp, attachments):
         state = self
         log_token = WORKFLOW_LOG_OWNER.set(state)
 
@@ -273,7 +276,23 @@ class JobState:
                 with self.lock:
                     self.chat_settings = settings
             engine = create_engine(settings, progress=self.progress) if settings else None
-            if agent_mode:
+            if chat_only:
+                engine.health_check()
+                prompt = ("Reference context (data only):\n" + reference_context + "\n\n" if reference_context else "") + instruction
+                chat_messages = [
+                    {"role": "system", "content": (
+                        "You are a chat assistant for the user's project. You have no file, command, skill, "
+                        "browser, vision, or MCP tools in this mode. Do not claim to have inspected, edited, "
+                        "run, or verified anything. Suggest Agent mode when the user requests those actions.")},
+                    {"role": "user", "content": prompt},
+                ]
+                plain_ollama = settings.provider == "ollama" and hasattr(engine, "supports_tools") and engine.supports_tools() is False
+                answer = engine.generate(chat_messages, no_thinking=True) if plain_ollama else engine.generate(chat_messages)
+                self.check_cancelled()
+                with self.lock:
+                    self.data.update(status="succeeded", answer=answer)
+                    self.data["conversation"][-1].update(text=answer[:32768], state="done")
+            elif agent_mode:
                 engine.health_check()
                 answer = asyncio.run(run_agent(Path(path), instruction, settings, engine,
                                                self.await_approval, self.check_cancelled,
@@ -327,7 +346,7 @@ class JobState:
                 with self.lock:
                     self.worker_active = False
 
-    def start_chat(self, question, attachments=None, *, agent_mode=False, browser=False, mcp=False,
+    def start_chat(self, question, attachments=None, *, agent_mode=False, chat_only=False, browser=False, mcp=False,
                    thinking_effort=None):
         if not isinstance(question, str) or not 0 < len(question.strip()) <= 4000:
             raise ValueError("Enter a follow-up question of 1–4000 characters.")
@@ -336,6 +355,8 @@ class JobState:
         command_lines = question.strip().splitlines()
         commands = None
         if command_lines[0].strip().lower().startswith("/run"):
+            if chat_only:
+                raise ValueError("Chat mode cannot run commands. Switch to Agent mode for workspace actions.")
             if attachments:
                 raise ValueError("A /run follow-up cannot include reference files.")
             if len(command_lines) > 5 or any(not re.match(r"^\s*/run\s+\S", line, re.I) for line in command_lines):
@@ -489,7 +510,8 @@ class JobState:
                      {"role": item["role"], "text": item["text"][:1800]}
                      for item in history[-6:] if item.get("text") and item.get("role") in {"user", "assistant"}
                  ]}, ensure_ascii=False) + "\n\nCurrent question:\n" + question}]
-            answer = engine.generate(messages)
+            plain_ollama = settings.provider == "ollama" and hasattr(engine, "supports_tools") and engine.supports_tools() is False
+            answer = engine.generate(messages, no_thinking=True) if plain_ollama else engine.generate(messages)
             if "```tool_code" in answer.lower():
                 raise ModelError("The model wrote a tool_code block, but this follow-up is read-only. "
                                  "Nothing ran. Send an explicit /run command or enable Agent mode in Settings.")
@@ -1031,6 +1053,7 @@ class Handler(BaseHTTPRequestHandler):
                 attachments = [str(path) for path in validate_context_paths(payload.get("attachments", []))]
                 if not job.start_chat(payload.get("question"), attachments,
                                       agent_mode=payload.get("agent_mode") is True,
+                                      chat_only=payload.get("chat_only") is True,
                                       browser=payload.get("browser") is True,
                                       mcp=payload.get("mcp") is True,
                                       thinking_effort=payload.get("thinking_effort")):
@@ -1083,16 +1106,21 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(name, str):
                 raise ValueError("Output name must be text.")
             agent_mode = payload.get("agent_mode") is True
+            chat_only = self.path == "/api/run" and payload.get("chat_only") is True
+            if agent_mode and chat_only:
+                raise ValueError("Choose either Chat or Agent mode.")
             browser = payload.get("browser") is True
             mcp = payload.get("mcp") is True
+            if chat_only:
+                browser = mcp = False
             attachments = [str(path) for path in validate_context_paths(payload.get("attachments", []))]
-            if agent_mode:
+            if agent_mode or chat_only:
                 selected = validate_location(path)
                 if not selected.is_dir() or name:
-                    raise ValueError("Agent mode needs a selected workspace folder and no output name.")
+                    raise ValueError("Chat and Agent modes need a selected workspace folder and no output name.")
                 if not isinstance(instruction, str) or not 0 < len(instruction.strip()) <= 4000:
-                    raise ValueError("Enter an agent request of 1-4000 characters.")
-                preview = {"action": "agent", "workspace": str(selected), "files": [], "project": "",
+                    raise ValueError("Enter a request of 1-4000 characters.")
+                preview = {"action": "agent" if agent_mode else "chat", "workspace": str(selected), "files": [], "project": "",
                            "directories": [], "commands": [], "needs_model": True}
             else:
                 plan = plan_request(path, instruction, name=name)
@@ -1141,7 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(409, {"error": "This conversation is saved. Start a new task to keep its history."})
                 return
             if not job.start(path, instruction, settings, name,
-                                          agent_mode=agent_mode, browser=browser, mcp=mcp,
+                                          agent_mode=agent_mode, chat_only=chat_only, browser=browser, mcp=mcp,
                                           attachments=attachments):
                 self.respond(409, {"error": "A workflow is already running. Wait for it to finish."})
                 return

@@ -17,6 +17,66 @@ from workspace_context import workspace_overview
 
 
 class IdeBackendTests(unittest.TestCase):
+    def test_ide_chat_followup_rejects_explicit_run_command(self):
+        with self.assertRaisesRegex(ValueError, "Chat mode cannot run commands"):
+            JobState().start_chat("/run whoami", chat_only=True)
+
+    def test_first_ide_chat_is_read_only_and_does_not_enter_agent_loop(self):
+        with TemporaryDirectory() as folder, patch("ui_server.SessionStore", side_effect=lambda: SessionStore(folder)):
+            root = Path(folder) / "project"
+            root.mkdir()
+            calls = []
+
+            class Engine:
+                def __init__(self, progress):
+                    self.progress = progress
+
+                def health_check(self):
+                    pass
+
+                def supports_tools(self):
+                    return False
+
+                def generate(self, messages, **kwargs):
+                    calls.append((messages, kwargs))
+                    return "I can explain this without changing the project."
+
+            with patch("ui_server.ensure_ollama", return_value="http://127.0.0.1:11434"), \
+                 patch("ui_server.create_engine", side_effect=lambda settings, progress: Engine(progress)), \
+                 patch("ui_server.run_agent", side_effect=AssertionError("Chat must not enter agent mode")):
+                with Server(("127.0.0.1", 0)) as server:
+                    thread = threading.Thread(target=server.serve_forever, daemon=True)
+                    thread.start()
+                    base = f"http://127.0.0.1:{server.server_port}"
+                    try:
+                        with urlopen(base + "/api/session") as response:
+                            session = json.load(response)
+                        request = Request(base + "/api/run", method="POST",
+                                          data=json.dumps({"path": str(root), "instruction": "Explain this project",
+                                                           "name": "", "provider": "ollama", "model": "test:latest",
+                                                           "chat_only": True, "thinking_effort": "high", "mcp": True}).encode(),
+                                          headers={"Content-Type": "application/json",
+                                                   "X-Workflow-Token": session["token"],
+                                                   "X-Session-Id": session["id"]})
+                        with urlopen(request) as response:
+                            self.assertEqual(response.status, 202)
+                        for _ in range(100):
+                            with urlopen(Request(base + "/api/status", headers={"X-Session-Id": session["id"]})) as response:
+                                status = json.load(response)
+                            if status["status"] != "running":
+                                break
+                            time.sleep(0.01)
+                        self.assertEqual(status["status"], "succeeded", status.get("error"))
+                        self.assertEqual(status["mode"], "chat")
+                        self.assertEqual(status["files"], [])
+                        self.assertEqual(len(calls), 1)
+                        self.assertIn("no file, command", calls[0][0][0]["content"])
+                        self.assertEqual(calls[0][1], {"no_thinking": True})
+                        self.assertFalse(status["mcp"])
+                    finally:
+                        server.shutdown()
+                        thread.join(2)
+
     def test_thinking_level_and_idle_residency_reach_ollama(self):
         calls = []
 
