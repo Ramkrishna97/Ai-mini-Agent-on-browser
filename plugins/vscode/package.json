@@ -1,0 +1,22 @@
+{
+  "name": "ai-agent-mini",
+  "displayName": "AI Agent Mini",
+  "description": "Local coding agent for your VS Code workspace",
+  "version": "0.3.0",
+  "publisher": "local-ai-agent-mini",
+  "engines": {"vscode": "^1.96.0"},
+  "categories": ["Other"],
+  "activationEvents": ["onView:aiAgentMini.chat", "onCommand:aiAgentMini.open"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [{"command": "aiAgentMini.open", "title": "AI Agent Mini: Open Chat"}],
+    "viewsContainers": {"activitybar": [{"id": "aiAgentMini", "title": "AI Agent Mini", "icon": "media/icon.svg"}]},
+    "views": {"aiAgentMini": [{"type": "webview", "id": "aiAgentMini.chat", "name": "Local Agent"}]},
+    "configuration": {"title": "AI Agent Mini", "properties": {
+      "aiAgentMini.appPath": {"type": "string", "default": "", "description": "Optional backend override; the plugin includes its own backend and normally needs no app folder."},
+      "aiAgentMini.port": {"type": "number", "default": 8765, "minimum": 1, "maximum": 65535, "description": "Local backend port."}
+    }}
+  },
+  "scripts": {"build": "tsc -p .", "package": "npm run build && python ../package_backend.py backend && vsce package --no-dependencies --allow-missing-repository"},
+  "devDependencies": {"@types/node": "^24.0.0", "@types/vscode": "^1.96.0", "@vscode/vsce": "^3.6.0", "typescript": "^5.9.0"}
+}
