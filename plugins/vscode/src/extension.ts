@@ -144,12 +144,9 @@ class ChatView implements vscode.WebviewViewProvider {
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
     view.webview.options = { enableScripts: true };
-    view.webview.html = this.html();
     view.webview.onDidReceiveMessage(message => void this.handle(message).catch(error => this.error(error)));
+    view.webview.html = this.html();
     this.timer = setInterval(() => { if (this.started) void this.refresh().catch(error => this.error(error)); }, 1000);
-    try { this.send({ type: 'workspace', workspace: this.workspace().uri.fsPath }); }
-    catch (error) { this.error(error); }
-    void this.listModels().catch(error => this.error(error));
     view.onDidDispose(() => { if (this.timer) clearInterval(this.timer); this.view = undefined; });
   }
 
@@ -208,7 +205,11 @@ class ChatView implements vscode.WebviewViewProvider {
   }
 
   private async handle(message: Json): Promise<void> {
-    if (message.type === 'start') {
+    if (message.type === 'ready') {
+      this.send({ type: 'workspace', workspace: this.workspace().uri.fsPath });
+      await this.listModels();
+      if (this.started) await this.refresh();
+    } else if (message.type === 'start') {
       const root = this.workspace();
       this.send({ type: 'starting' });
       await this.backend.connect(root.uri.fsPath);
@@ -321,27 +322,27 @@ class ChatView implements vscode.WebviewViewProvider {
       button,select,textarea{font:inherit;color:inherit;background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);border-radius:5px;padding:6px}
       button{cursor:pointer}button:hover{background:var(--vscode-list-hoverBackground)}button:disabled{opacity:.5}
       textarea{width:100%;box-sizing:border-box;min-height:82px;resize:vertical}select{max-width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere}
-      .row{display:flex;gap:6px;margin:8px 0;flex-wrap:wrap}.answer{white-space:pre-wrap;overflow-wrap:anywhere}.small{font-size:11px;opacity:.75;overflow-wrap:anywhere}
+      .row{display:flex;gap:6px;margin:5px 0;flex-wrap:wrap;align-items:center}.answer{white-space:pre-wrap;overflow-wrap:anywhere}.small{font-size:11px;opacity:.75;overflow-wrap:anywhere}
       #approval{border:1px solid var(--vscode-focusBorder);padding:8px}#error{color:var(--vscode-errorForeground)}
       *{box-sizing:border-box}body{margin:0;padding:0;background:var(--vscode-sideBar-background)}
-      .shell{display:flex;flex-direction:column;height:100vh}.hero{padding:16px;border-bottom:1px solid var(--vscode-panel-border);background:linear-gradient(135deg,var(--vscode-sideBar-background),var(--vscode-editor-background))}
-      .brand{font-size:16px;font-weight:700}.sub{font-size:11px;opacity:.75;margin:3px 0 13px}.content{flex:1;padding:12px;overflow:auto}.composer{position:sticky;bottom:0;padding:12px;border-top:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background)}
+      .shell{display:flex;flex-direction:column;height:100vh}.hero{padding:10px 12px;border-bottom:1px solid var(--vscode-panel-border);background:linear-gradient(135deg,var(--vscode-sideBar-background),var(--vscode-editor-background))}
+      .brand{font-size:14px;font-weight:700;margin-bottom:6px}.content{flex:1;min-height:0;padding:12px;overflow:auto}.composer{padding:10px 12px;border-top:1px solid var(--vscode-panel-border);background:var(--vscode-sideBar-background)}
       #thread{display:flex;flex-direction:column;gap:10px}.message{padding:11px;border:1px solid var(--vscode-panel-border);border-radius:12px;max-width:min(85%,720px);min-width:100px;overflow-wrap:anywhere}.message.user{align-self:flex-start;background:var(--vscode-input-background)}.message.agent{align-self:flex-end;background:var(--vscode-editor-background)}.message strong{display:block;margin-bottom:5px}.answer{line-height:1.45}.activity{margin-top:10px;border-top:1px solid var(--vscode-panel-border);padding-top:7px}.activity summary{cursor:pointer;font-size:11px;opacity:.85}.activity-body{max-height:180px;overflow:auto;margin-top:7px}.activity-entry{margin:0 0 8px}.activity-entry strong{font-size:11px}.activity-entry pre{margin:2px 0 0;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}.file-actions{display:flex;align-self:flex-end;gap:6px;flex-wrap:wrap}
       .primary{background:var(--vscode-button-background);color:var(--vscode-button-foreground);border-color:transparent;font-weight:600}.primary:hover{background:var(--vscode-button-hoverBackground)}
-      .sendrow{display:flex;justify-content:space-between;align-items:center;gap:8px}.sendrow .small{font-size:10px}#model{flex:1;min-width:110px}#endpoint{width:100%}#ggufRow,#lmRow,#lmExtras{display:none}#contextTokens{width:100px}
-    </style></head><body><div class="shell"><div class="hero"><div class="brand">✦ AI Agent Mini</div><div class="sub">Your local coding agent, inside this workspace</div><div class="row"><button id="start" class="primary">▶ Start</button><button id="new">New chat</button><button id="cancel">Stop</button></div>
-      <div class="row"><select id="provider" aria-label="Model source"><option value="ollama">Ollama</option><option value="gguf">Local GGUF</option><option value="lmstudio">LM Studio API</option></select></div>
+      .sendrow{display:flex;justify-content:space-between;align-items:center;gap:8px}.sendrow .small{font-size:10px}#model{flex:1;min-width:110px}#provider{margin-left:auto}#endpoint{width:100%}#ggufRow,#lmRow,#lmExtras{display:none}#contextTokens{width:100px}#advanced{margin:5px 0}#advanced summary{cursor:pointer;font-size:11px;opacity:.85}#workspace,#state{display:inline-block;margin:2px 6px 0 0}#workspace{max-width:40%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+    </style></head><body><div class="shell"><div class="hero"><div class="brand">✦ AI Agent Mini</div><div class="row"><button id="start" class="primary">▶ Start</button><button id="new">New chat</button><button id="cancel">Stop</button><select id="provider" aria-label="Model source"><option value="ollama">Ollama</option><option value="gguf">Local GGUF</option><option value="lmstudio">LM Studio API</option></select></div>
       <div class="row" id="modelRow"><select id="model"><option value="">Choose model</option></select><button id="refresh">Refresh</button><button id="load">Load</button></div>
       <div class="row" id="ggufRow"><button id="chooseGguf">Choose GGUF file</button><span id="ggufPath" class="small"></span></div>
       <div class="row" id="lmRow"><input id="endpoint" type="url" value="http://localhost:1234" aria-label="LM Studio API URL"><button id="connectLm">Connect</button></div>
-      <div class="row"><label>Context <input id="contextTokens" type="number" min="16384" max="262144" step="1024" value="16384" aria-label="Context tokens"></label></div>
+      <details id="advanced"><summary>Settings</summary><div class="row"><label>Context <input id="contextTokens" type="number" min="16384" max="262144" step="1024" value="16384" aria-label="Context tokens"></label></div>
       <div id="lmExtras"><div class="row"><button id="lmSkills">Choose skill folder</button><button id="lmMcp">Choose MCP JSON</button></div><p id="lmSources" class="small">Optional local sources; MCP tools still require approval.</p></div>
-      <div class="row"><label>Mode <select id="mode"><option value="agent">Agent · plan and edit</option><option value="chat">Chat · answer only</option></select></label><label>Thinking <select id="effort"><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><input type="checkbox" id="mcp"> MCP</label><label><input type="checkbox" id="browser"> Browser</label></div>
-      <p id="workspace" class="small"></p><p id="state" class="small">Connecting…</p></div><div class="content"><div id="plan"></div><div id="approval" hidden></div><div id="thread"></div>
+      <div class="row"><label>Mode <select id="mode"><option value="agent">Agent · plan and edit</option><option value="chat">Chat · answer only</option></select></label><label>Thinking <select id="effort"><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></label><label><input type="checkbox" id="mcp"> MCP</label><label><input type="checkbox" id="browser"> Browser</label></div></details>
+      <div><span id="workspace" class="small"></span><span id="state" class="small">Initializing…</span></div></div><div class="content"><div id="plan"></div><div id="approval" hidden></div><div id="thread"></div>
       <p id="error" role="alert"></p></div><div class="composer"><textarea id="prompt" aria-label="Request" placeholder="Ask to plan, edit, run, or fix code in this workspace"></textarea>
       <div class="sendrow"><span class="small">Enter sends · Shift+Enter adds a line</span><button id="send" class="primary">Send</button></div></div></div><script nonce="${nonce}">
       const api=acquireVsCodeApi(),$=id=>document.getElementById(id); let selected='',initialized=false;const expandedActivities=new Set();
       const post=(type,more={})=>api.postMessage({type,...more});
+      const setWorkspace=path=>{const el=$('workspace');el.title=path;el.textContent=path.slice(Math.max(path.lastIndexOf('/'),path.lastIndexOf(String.fromCharCode(92)))+1);};
       const showProvider=()=>{const p=$('provider').value;$('modelRow').style.display=p==='gguf'?'none':'flex';$('ggufRow').style.display=p==='gguf'?'flex':'none';$('lmRow').style.display=p==='lmstudio'?'flex':'none';$('lmExtras').style.display=p==='lmstudio'?'block':'none';$('load').textContent=p==='lmstudio'?'Load in LM Studio':'Load';};
       $('provider').onchange=()=>{showProvider();selected='';post('provider',{provider:$('provider').value,endpoint:$('endpoint').value});};
       $('model').onchange=()=>{selected=$('model').value;};
@@ -352,8 +353,8 @@ class ChatView implements vscode.WebviewViewProvider {
       $('send').onclick=()=>{const text=$('prompt').value.trim();if(text)post('prompt',{text,provider:$('provider').value,model:$('model').value,endpoint:$('endpoint').value,contextTokens:$('contextTokens').value,effort:$('effort').value,agentMode:$('mode').value==='agent',mcp:$('mcp').checked,browser:$('browser').checked});};
       $('prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();$('send').click();}};
       window.addEventListener('message',event=>{const data=event.data;
-        if(data.type==='error'){$('error').textContent=data.message;return;}
-        if(data.type==='workspace'){$('workspace').textContent=data.workspace;$('state').textContent='Choose a model, then Start';return;}
+        if(data.type==='error'){$('error').textContent=data.message;if($('state').textContent==='Initializing…')$('state').textContent='Needs attention';return;}
+        if(data.type==='workspace'){setWorkspace(data.workspace);$('state').textContent='Choose a model, then Start';return;}
         if(data.type==='starting'){$('state').textContent='Starting local agent…';$('error').textContent='';return;}
         if(data.type==='state'){$('state').textContent=data.message;return;}
         if(data.type==='ggufSelected'){$('ggufPath').textContent=data.path;return;}
@@ -363,7 +364,7 @@ class ChatView implements vscode.WebviewViewProvider {
         if(selected&&$('model').value!==selected&&!Array.from($('model').options).some(o=>o.value===selected))$('model').add(new Option(selected,selected));
         if(selected&&data.provider===$('provider').value)$('model').value=selected;
         if(!initialized){$('effort').value=s.thinking_effort||data.effort||'off';initialized=true;}
-        $('ggufPath').textContent=data.ggufPath||'';$('workspace').textContent=data.workspace;
+        $('ggufPath').textContent=data.ggufPath||'';setWorkspace(data.workspace);
         $('lmSources').textContent='Skills: '+(data.extraSkillRoot||'none')+' · MCP: '+(data.extraMcpConfig||'none')+' (approval required)';
         $('state').textContent=s.status+((s.model_preload?.phase==='loading'||s.lmstudio_preload?.phase==='loading')?' · loading model':'')+(s.lmstudio_preload?.phase==='ready'?' · LM Studio ready':'');
         $('send').disabled=s.status==='running'||s.model_preload?.busy||s.lmstudio_preload?.busy;$('error').textContent=s.error||s.lmstudio_preload?.error||'';
@@ -374,7 +375,7 @@ class ChatView implements vscode.WebviewViewProvider {
         (s.conversation||[]).forEach((msg,index)=>{const box=document.createElement('div');box.className='message '+(msg.role==='user'?'user':'agent');const label=document.createElement('strong');label.textContent=msg.role==='user'?'You':'Agent';const body=document.createElement('div');body.className='answer';body.textContent=msg.text||((msg.state==='working')?'Working…':'');box.append(label,body);
           const steps=msg.steps||[],logs=msg.logs||[];if(msg.role==='assistant'&&(steps.length||logs.length)){const details=document.createElement('details');details.className='activity';details.open=expandedActivities.has(index);details.ontoggle=()=>{if(details.open)expandedActivities.add(index);else expandedActivities.delete(index);};const summary=document.createElement('summary');summary.textContent='Activity · '+steps.length+' step'+(steps.length===1?'':'s')+(logs.length?', '+logs.length+' log line'+(logs.length===1?'':'s'):'');const content=document.createElement('div');content.className='activity-body';for(const step of steps){const entry=document.createElement('div');entry.className='activity-entry';const title=document.createElement('strong');title.textContent=step.label||'Tool result';const detail=document.createElement('pre');detail.textContent=step.detail||'';entry.append(title,detail);content.append(entry);}if(logs.length){const log=document.createElement('pre');log.textContent=logs.join('\n');content.append(log);}details.append(summary,content);box.append(details);}$('thread').append(box);});
         if((s.files||[]).length){const row=document.createElement('div');row.className='file-actions';for(const file of s.files){const b=document.createElement('button');b.textContent='Open '+file;b.onclick=()=>post('open',{path:file});row.append(b);} $('thread').append(row);}scroller.scrollTop=atBottom?scroller.scrollHeight:oldScroll;
-      });showProvider();</script></body></html>`;
+      });showProvider();post('ready');</script></body></html>`;
   }
 }
 
