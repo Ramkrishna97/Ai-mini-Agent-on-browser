@@ -66,6 +66,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private final JComboBox<String> model = new JComboBox<>();
         private final JSpinner contextTokens = new JSpinner(new SpinnerNumberModel(16384, 16384, 262144, 1024));
         private final JComboBox<String> effort = new JComboBox<>(new String[]{"off", "low", "medium", "high"});
+        private final JComboBox<String> mode = new JComboBox<>(new String[]{"Agent · plan and edit", "Chat · answer only"});
         private final JCheckBox mcp = new JCheckBox("MCP tools");
         private final JCheckBox browser = new JCheckBox("Browser tools");
         private final JTextArea transcript = new JTextArea();
@@ -84,6 +85,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private String pendingId = "";
         private JsonObject lastStatus;
         private boolean bootAttempted;
+        private boolean started;
 
         AgentPanel(Project project) {
             super(new BorderLayout(6, 6));
@@ -111,8 +113,40 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             top.add(subtitle);
             JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
             JButton start = new JButton("▶ Start");
-            start.addActionListener(e -> execute(() -> { ensureBackend(); refreshNow(); listModels(); }));
+            start.addActionListener(e -> execute(() -> {
+                SwingUtilities.invokeLater(() -> state.setText("Starting local agent…"));
+                ensureBackend();
+                started = true;
+                if (provider.getSelectedIndex() == 0) {
+                    try { api("/api/models", null); }
+                    catch (Exception error) { SwingUtilities.invokeLater(() -> state.setText(error.getMessage())); }
+                }
+                refreshNow();
+                try { listModels(); }
+                catch (Exception error) { SwingUtilities.invokeLater(() -> state.setText(error.getMessage())); }
+            }));
             actions.add(start);
+            JButton newChat = new JButton("New chat");
+            newChat.addActionListener(e -> execute(() -> {
+                ensureBackend();
+                started = true;
+                JsonObject created = api("/api/sessions", new JsonObject());
+                session = string(created, "id");
+                properties.setValue("aiAgentMini.session", session);
+                lastStatus = null;
+                refreshNow();
+            }));
+            actions.add(newChat);
+            JButton cancel = new JButton("Stop");
+            cancel.addActionListener(e -> execute(() -> {
+                if (!started) {
+                    SwingUtilities.invokeLater(() -> state.setText("No request is running."));
+                    return;
+                }
+                api("/api/cancel", new JsonObject());
+                refreshNow();
+            }));
+            actions.add(cancel);
             top.add(actions);
             top.add(provider);
             chooseGguf.addActionListener(e -> {
@@ -166,11 +200,13 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 if (provider.getSelectedIndex() != 1) execute(() -> listModels());
             });
             updateProviderUi();
-            JPanel settings = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+            JPanel settings = new JPanel(new GridLayout(0, 2, 4, 2));
             load.addActionListener(e -> {
                 String chosenModel = String.valueOf(model.getSelectedItem());
                 execute(() -> {
                 if (chosenModel.isBlank() || chosenModel.equals("Choose model")) throw new IOException("Choose an installed model.");
+                ensureBackend();
+                started = true;
                 selectedModel = chosenModel;
                 properties.setValue("aiAgentMini.model", selectedModel);
                 if (provider.getSelectedIndex() == 0) {
@@ -192,20 +228,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             settings.add(contextTokens);
             settings.add(new JLabel("Thinking"));
             settings.add(effort);
+            settings.add(mode);
             settings.add(mcp);
             settings.add(browser);
-            JButton newChat = new JButton("New chat");
-            newChat.addActionListener(e -> execute(() -> {
-                JsonObject created = api("/api/sessions", new JsonObject());
-                session = string(created, "id");
-                properties.setValue("aiAgentMini.session", session);
-                lastStatus = null;
-                refreshNow();
-            }));
-            settings.add(newChat);
-            JButton cancel = new JButton("Stop");
-            cancel.addActionListener(e -> execute(() -> api("/api/cancel", new JsonObject())));
-            settings.add(cancel);
             top.add(settings);
             state.setBorder(BorderFactory.createEmptyBorder(8, 3, 8, 3));
             top.add(state);
@@ -237,6 +262,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 String text = prompt.getText().trim();
                 if (!text.isEmpty()) {
                     String chosenEffort = String.valueOf(effort.getSelectedItem());
+                    boolean useAgent = mode.getSelectedIndex() == 0;
                     boolean useMcp = mcp.isSelected();
                     boolean useBrowser = browser.isSelected();
                     String activeFile = "";
@@ -249,7 +275,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     }
                     String instruction = activeFile + text;
                     execute(() -> {
-                        submit(instruction, chosenEffort, useMcp, useBrowser);
+                        submit(instruction, chosenEffort, useAgent, useMcp, useBrowser);
                         SwingUtilities.invokeLater(() -> {
                             if (prompt.getText().trim().equals(text)) prompt.setText("");
                         });
@@ -259,9 +285,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             bottom.add(send, BorderLayout.EAST);
             bottom.add(new JLabel("Enter sends  ·  Shift+Enter adds a line"), BorderLayout.SOUTH);
             add(bottom, BorderLayout.SOUTH);
-            timer = new Timer(1500, e -> refresh());
+            timer = new Timer(1500, e -> { if (started) refresh(); });
             timer.start();
-            refresh();
+            state.setText("Choose a model, then Start");
             if (provider.getSelectedIndex() != 1) execute(() -> listModels());
         }
 
@@ -416,22 +442,37 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private void listModels() throws Exception {
             int source = provider.getSelectedIndex();
             if (source == 1) return;
-            JsonObject request = null;
-            String path = "/api/models";
+            String address = source == 2 ? endpoint.getText().trim() :
+                    System.getenv().getOrDefault("OLLAMA_HOST", "http://127.0.0.1:11434");
+            if (!address.contains("://")) address = "http://" + address;
+            URI uri = URI.create(address);
+            if (!"localhost".equals(uri.getHost()) && !"127.0.0.1".equals(uri.getHost())
+                    && !"::1".equals(uri.getHost())) throw new IOException("Model discovery is limited to local servers.");
+            String base = uri.getScheme() + "://" + uri.getAuthority();
             if (source == 2) {
-                request = new JsonObject();
-                request.addProperty("endpoint", endpoint.getText().trim());
                 properties.setValue("aiAgentMini.endpoint", endpoint.getText().trim());
-                path = "/api/lmstudio/models";
+                if (!uri.getPath().isBlank() && !"/".equals(uri.getPath()) && !"/v1".equals(uri.getPath()))
+                    throw new IOException("Use the LM Studio server URL or its /v1 URL.");
             }
-            JsonArray items = api(path, request).getAsJsonArray("models");
+            JsonArray items;
+            if (source == 2) {
+                try { items = externalJson(base + "/api/v1/models").getAsJsonArray("models"); }
+                catch (IOException error) {
+                    if (!error.getMessage().contains("404")) throw error;
+                    items = externalJson(base + "/v1/models").getAsJsonArray("data");
+                }
+            } else items = externalJson(base + "/api/tags").getAsJsonArray("models");
+            JsonArray entries = items;
             SwingUtilities.invokeLater(() -> {
                 if (provider.getSelectedIndex() != source) return;
                 model.removeAllItems();
                 model.addItem("Choose model");
-                for (JsonElement item : items) {
+                for (JsonElement item : entries) {
                     JsonObject entry = item.getAsJsonObject();
-                    if (entry.get("can_generate").getAsBoolean()) model.addItem(string(entry, "name"));
+                    if (source == 2 && entry.has("type") && !"llm".equals(string(entry, "type"))) continue;
+                    String name = source == 2 ? entry.has("key") ? string(entry, "key") : string(entry, "id")
+                            : entry.has("name") ? string(entry, "name") : string(entry, "model");
+                    if (!name.isBlank()) model.addItem(name);
                 }
                 boolean found = false;
                 for (int i = 0; i < model.getItemCount(); i++)
@@ -440,7 +481,22 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             });
         }
 
-        private void submit(String instruction, String chosenEffort, boolean useMcp, boolean useBrowser) throws Exception {
+        private JsonObject externalJson(String url) throws Exception {
+            HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
+            connection.setConnectTimeout(3000);
+            connection.setReadTimeout(5000);
+            try {
+                int code = connection.getResponseCode();
+                if (code >= 400) throw new IOException("Model server returned " + code);
+                return JsonParser.parseString(new String(connection.getInputStream().readAllBytes(),
+                        StandardCharsets.UTF_8)).getAsJsonObject();
+            } finally { connection.disconnect(); }
+        }
+
+        private void submit(String instruction, String chosenEffort, boolean useAgent,
+                            boolean useMcp, boolean useBrowser) throws Exception {
+            ensureBackend();
+            started = true;
             if (project.getBasePath() == null || project.getBasePath().isBlank())
                 throw new IOException("Open a local IntelliJ project first.");
             Path root = Path.of(project.getBasePath()).toAbsolutePath().normalize();
@@ -459,8 +515,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     && source.equals(string(lastStatus, "provider")) && chosenModel.equals(string(lastStatus, "model"))
                     && lastStatus.has("conversation") && lastStatus.getAsJsonArray("conversation").size() > 0) {
                 request.addProperty("question", instruction);
-                request.addProperty("agent_mode", true);
-                request.addProperty("mcp", useMcp);
+                request.addProperty("agent_mode", useAgent);
+                request.addProperty("chat_only", !useAgent);
+                request.addProperty("mcp", useAgent && useMcp);
                 request.addProperty("browser", useBrowser);
                 request.addProperty("thinking_effort", chosenEffort);
                 api("/api/chat", request);
@@ -481,8 +538,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     request.addProperty("extra_skill_root", extraSkillRoot);
                     if (useMcp) request.addProperty("extra_mcp_config", extraMcpConfig);
                 }
-                request.addProperty("agent_mode", true);
-                request.addProperty("mcp", useMcp);
+                request.addProperty("agent_mode", useAgent);
+                request.addProperty("chat_only", !useAgent);
+                request.addProperty("mcp", useAgent && useMcp);
                 request.addProperty("browser", useBrowser);
                 request.addProperty("thinking_effort", chosenEffort);
                 request.addProperty("max_tokens", 4096);
