@@ -33,7 +33,7 @@ class FakeClient:
 
     def generate(self, *, model, prompt, keep_alive):
         self.calls.append((model, prompt, keep_alive))
-        if model == "first:latest" and keep_alive == -1:
+        if model == "first:latest" and keep_alive == "10m":
             self.first_started.set()
             if not self.release_first.wait(2):
                 raise TimeoutError("Test model load was not released.")
@@ -62,8 +62,8 @@ class ModelPreloadTests(unittest.TestCase):
         manager.select("second:latest")
         client.release_first.set()
         self.assertEqual(self.wait_for(manager, "ready")["loaded"], "second:latest")
-        self.assertEqual(client.calls, [("first:latest", "", -1), ("first:latest", "", 0),
-                                        ("second:latest", "", -1)])
+        self.assertEqual(client.calls, [("first:latest", "", "10m"), ("first:latest", "", 0),
+                                        ("second:latest", "", "10m")])
         manager.offload("second:latest")
         off = self.wait_for(manager, "off")
         self.assertEqual(off["loaded"], "")
