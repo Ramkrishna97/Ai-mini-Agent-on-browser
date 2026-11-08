@@ -12,11 +12,31 @@ from urllib.request import Request, urlopen
 
 from agent_tools import ToolRuntime
 from config import OllamaEngine, Settings
-from ui_server import JobState, OllamaPreloader, Server, SessionStore
+from ui_server import JobState, OllamaPreloader, Server, SessionStore, record_turn_log, record_turn_step
 from workspace_context import workspace_overview
 
 
 class IdeBackendTests(unittest.TestCase):
+    def test_activity_proof_stays_with_its_reply_and_is_bounded(self):
+        state = JobState()
+        state.data["conversation"] = [{"role": "user", "text": "Run tests"},
+                                      {"role": "assistant", "text": "", "state": "working"}]
+        state.progress({"step": {"label": "Command result", "detail": "> pytest\nExit code: 0\n141 passed"}})
+        record_turn_log(state.data, "Test suite completed")
+        first = state.snapshot()["conversation"][1]
+        self.assertIn("141 passed", first["steps"][0]["detail"])
+        self.assertEqual(first["logs"], ["Test suite completed"])
+        state.data["conversation"].extend([{"role": "user", "text": "Next"},
+                                           {"role": "assistant", "text": "", "state": "working"}])
+        for index in range(40):
+            record_turn_step(state.data, {"label": str(index), "detail": "x" * 2100})
+            record_turn_log(state.data, str(index))
+        second = state.snapshot()["conversation"][3]
+        self.assertEqual(len(second["steps"]), 32)
+        self.assertEqual(len(second["logs"]), 40)
+        self.assertEqual(len(second["steps"][-1]["detail"]), 2000)
+        self.assertEqual(len(state.snapshot()["conversation"][1]["steps"]), 1)
+
     def test_ide_chat_followup_rejects_explicit_run_command(self):
         with self.assertRaisesRegex(ValueError, "Chat mode cannot run commands"):
             JobState().start_chat("/run whoami", chat_only=True)

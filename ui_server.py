@@ -44,6 +44,24 @@ MODEL_IDLE_SECONDS = 600
 WORKFLOW_LOG_OWNER = contextvars.ContextVar("workflow_log_owner", default=None)
 LOG_ENTRY_LIMIT = 2000
 LOG_HISTORY_LIMIT = 300
+TURN_STEP_LIMIT = 32
+TURN_LOG_LIMIT = 40
+
+
+def record_turn_step(data, step):
+    """Keep a bounded, verifiable tool/command trail beside its answer."""
+    conversation = data.get("conversation") or []
+    if conversation and conversation[-1].get("role") == "assistant":
+        item = {"label": str(step.get("label", "Activity"))[:120],
+                "detail": str(step.get("detail", ""))[:2000]}
+        conversation[-1]["steps"] = (conversation[-1].get("steps", []) + [item])[-TURN_STEP_LIMIT:]
+
+
+def record_turn_log(data, message):
+    conversation = data.get("conversation") or []
+    if conversation and conversation[-1].get("role") == "assistant":
+        conversation[-1]["logs"] = (conversation[-1].get("logs", []) +
+                                     [str(message)[:500]])[-TURN_LOG_LIMIT:]
 
 
 def ollama_model_location_hint():
@@ -111,7 +129,9 @@ class JobState:
         with self.lock:
             return {**self.data, "logs": list(self.data["logs"]), "agent_steps": list(self.data.get("agent_steps", [])),
                     "generation": dict(self.data.get("generation", {})),
-                    "conversation": [dict(item) for item in self.data.get("conversation", [])]}
+                    "conversation": [{**item, "steps": [dict(step) for step in item.get("steps", [])],
+                                      "logs": list(item.get("logs", []))}
+                                     for item in self.data.get("conversation", [])]}
 
     def check_cancelled(self):
         if self.cancel_event.is_set():
@@ -130,6 +150,7 @@ class JobState:
                 steps = self.data.setdefault("agent_steps", [])
                 steps.append(event["step"])
                 self.data["agent_steps"] = steps[-80:]
+                record_turn_step(self.data, event["step"])
                 files = self.data.setdefault("files", [])
                 for path in event["step"].get("files", []):
                     if path not in files:
@@ -251,6 +272,7 @@ class JobState:
                 with state.lock:
                     state.data["logs"].append(message)
                     state.data["logs"] = state.data["logs"][-LOG_HISTORY_LIMIT:]
+                    record_turn_log(state.data, message)
 
         handler = JobLog()
         handler.setFormatter(logging.Formatter("%(asctime)s  %(levelname)s  %(message)s", "%H:%M:%S"))
@@ -312,6 +334,11 @@ class JobState:
                                f"{len(result.commands)} command(s).")
                     if result.files:
                         summary += "\n" + "\n".join(result.files[:20])
+                    for file in result.files[:20]:
+                        record_turn_step(self.data, {"label": "Saved file", "detail": file})
+                    for command in result.commands:
+                        record_turn_step(self.data, {"label": "Command result",
+                                                     "detail": f"> {command.get('command', '')}\nExit code: {command.get('exit_code')}\n{command.get('output', '')[-1800:]}"})
                     self.data["conversation"][-1].update(text=summary, state="done")
         except WorkflowCancelled as exc:
             logger.warning("%s", exc)
@@ -407,6 +434,7 @@ class JobState:
                     with self_state.lock:
                         self_state.data["logs"].append(self.format(record)[:LOG_ENTRY_LIMIT])
                         self_state.data["logs"] = self_state.data["logs"][-LOG_HISTORY_LIMIT:]
+                        record_turn_log(self_state.data, self.format(record))
 
         self_state = self
         handler = CommandLog() if commands or agent_mode else None
@@ -426,6 +454,8 @@ class JobState:
                     results.append(result)
                     with self.lock:
                         self.data["commands"] = [*self.data.get("commands", []), result]
+                        record_turn_step(self.data, {"label": "Command result",
+                                                     "detail": f"> {result.get('command', command)}\nExit code: {result.get('exit_code')}\n{result.get('output', '')[-1800:]}"})
                     if result["exit_code"]:
                         break
                 answer = "\n\n".join(
