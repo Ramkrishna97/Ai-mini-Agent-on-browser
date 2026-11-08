@@ -327,7 +327,7 @@ async function refreshWorkspace(force = false) {
 function payload() {
   return {path: pathInput.value, name: $('#agent-mode').checked ? '' : nameInput.value.trim(), instruction: instruction.value.trim(),
     provider: providerSelect.value, model: providerSelect.value === 'npu' ? npuModelSelect.value : modelSelect.value, gguf_path: ggufPath.value,
-    temperature: Number($('#temperature').value),
+    temperature: Number($('#temperature').value), thinking_effort: $('#thinking_effort').value,
     context_tokens: Number($('#context_tokens').value), max_tokens: Number($('#max_tokens').value), agent_mode: $('#agent-mode').checked,
     browser: $('#browser-enabled').checked, mcp: $('#mcp-enabled').checked, attachments};
 }
@@ -1023,6 +1023,7 @@ function render(data) {
     $('#browser-enabled').checked = Boolean(data.browser);
     $('#mcp-enabled').checked = Boolean(data.mcp);
     if (data.temperature != null) $('#temperature').value = data.temperature;
+    if (data.thinking_effort != null) $('#thinking_effort').value = data.thinking_effort;
     if (data.max_tokens != null) $('#max_tokens').value = data.max_tokens;
     if (data.context_tokens != null) $('#context_tokens').value = data.context_tokens;
     updateComposerLimits();
@@ -1143,7 +1144,8 @@ $('#workflow').addEventListener('submit', async event => {
   $('#top-status').dataset.state = 'running';
   try {
     if (followupMode) await post('/api/chat', {question: instruction.value.trim(), attachments,
-      agent_mode: $('#agent-mode').checked, browser: $('#browser-enabled').checked, mcp: $('#mcp-enabled').checked});
+      agent_mode: $('#agent-mode').checked, browser: $('#browser-enabled').checked, mcp: $('#mcp-enabled').checked,
+      thinking_effort: $('#thinking_effort').value});
     else {
       if (hasConversation) {
         const created = await post('/api/sessions', {});
@@ -1207,7 +1209,7 @@ async function poll() {
         sessionId = '';
         session = await request('/api/session');
       }
-      if (session.version !== 16) throw new Error('Restart the launcher to load the updated workflow server.');
+      if (session.version !== 17) throw new Error('Restart the launcher to load the updated workflow server.');
       token = session.token;
       sessionId = session.id;
       if (new URLSearchParams(location.search).get('session') !== sessionId)
