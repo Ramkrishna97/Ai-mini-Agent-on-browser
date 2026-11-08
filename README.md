@@ -1,6 +1,6 @@
 # Local file automation with Ollama, GGUF, or Intel NPU
 
-A Windows-friendly Python CLI and browser UI that use local Ollama, a
+A Windows-friendly Python CLI, browser UI, and optional IDE plugins that use local Ollama, a
 GGUF model loaded directly through llama.cpp, or an Intel NPU through OpenVINO.
 The browser starts in Agent mode. A tool-capable model can inspect and change the
 selected workspace and run local commands after you approve each request or choose
@@ -11,9 +11,10 @@ approval gate remains in front of every workspace, browser, and MCP tool.
 The activity panel shows concise progress and streamed model text, not private
 chain-of-thought. Model responses can include user-facing action summaries.
 
-Workspace skills live in `.agent/skills/<name>/SKILL.md`. The agent sees a
-bounded catalog of names and descriptions and can use `load_skill` to read a
-relevant skill on demand. Skills are guidance only; they cannot approve tools
+Workspace skills live in `.agent/skills/<name>/SKILL.md`. The agent can discover
+their names and descriptions with `list_skills`, then use `load_skill` only when
+a skill is relevant. Skill instructions are not eagerly included in every prompt.
+Skills are guidance only; they cannot approve tools
 or execute code. See `.agent/skills/verify-project/SKILL.md` for an example.
 
 The browser UI uses one continuous chat column with the composer below the
@@ -51,14 +52,43 @@ files, attached read-only references, public URLs, and recent conversation as
 context. With Agent mode enabled, follow-ups can also use tools. To run a literal command in
 the same conversation, send `/run your-command`; the app shows its real exit code
 and output. Each model tool call asks for approval until you choose **Always allow this chat**. A fenced `tool_code` block in model text
-is not a tool call and is never executed. The selected model stays loaded for follow-ups
-until a new task begins. The conversation survives a browser refresh while the
+is not a tool call and is never executed. Ollama models unload after ten minutes
+of inactivity and reload on the next request. Retained GGUF and NPU engines are
+also released after ten idle minutes. The conversation survives a browser refresh while the
 local app process remains open.
 
 Choosing an Ollama model in **Workspace & model** preloads it immediately, so
-the first prompt does not wait for the model to enter memory. Choosing another
+the first prompt does not wait for the model to enter memory. Preloaded models use
+Ollama's ten-minute keep-alive rather than being pinned indefinitely. Choosing another
 Ollama model offloads the previous one first. **Offload loaded model** releases
 the selected model without starting a new task; select it again to preload it.
+
+The generation settings offer **Off**, **Low**, **Medium**, and **High** thinking
+effort. Ollama receives the selected native `think` level. Choose a model that
+supports the desired level. The agent can publish a concise visible plan using
+`set_plan` and inspect a cached, bounded project map with `workspace_overview`.
+
+## IDE plugins
+
+The web app and [start.bat](./start.bat) remain the browser entry point. IDE
+adapters live separately under [plugins/](./plugins/), and both use the same
+loopback backend and approval-gated agent:
+
+- [VS Code extension](./plugins/vscode/README.md): run `npm install` and
+  `npm run package` from `plugins/vscode`, then install the resulting `.vsix`
+  through **Extensions → Install from VSIX**.
+- [IntelliJ IDEA plugin](./plugins/intellij/README.md): run `gradle buildPlugin`
+  from `plugins/intellij` with Java 17, then install the generated ZIP through
+  **Settings → Plugins → Install Plugin from Disk**.
+
+When the browser app is running, either plugin connects to it. Otherwise the
+plugin can start the same backend without opening a browser; it needs the app
+folder path once. Listing/loading a model starts Ollama if needed. The current
+IDE project root is the agent workspace, and the active editor path is supplied
+with each request. The agent can plan, edit, run checks, inspect diagnostics,
+and repair failures through its existing tools. The tool window/sidebar displays
+the plan, conversation, saved files, and approval requests. MCP tools are opt-in
+and use the same built-in local MCP server and `mcp_servers.json` configuration.
 
 ### Intel NPU model source
 
