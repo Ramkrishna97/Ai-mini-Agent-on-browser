@@ -57,11 +57,11 @@ of inactivity and reload on the next request. Retained GGUF and NPU engines are
 also released after ten idle minutes. The conversation survives a browser refresh while the
 local app process remains open.
 
-Choosing an Ollama model in **Workspace & model** preloads it immediately, so
-the first prompt does not wait for the model to enter memory. Preloaded models use
-Ollama's ten-minute keep-alive rather than being pinned indefinitely. Choosing another
+Choosing an Ollama model in **Workspace & model** does not load it. Click
+**Save & load** to preload the selection. Preloaded models use Ollama's
+ten-minute keep-alive rather than being pinned indefinitely. Saving another
 Ollama model offloads the previous one first. **Offload loaded model** releases
-the selected model without starting a new task; select it again to preload it.
+the selected model without starting a new task; click **Save & load** to preload it again.
 
 The generation settings offer **Off**, **Low**, **Medium**, and **High** thinking
 effort. Ollama receives the selected native `think` level. Choose a model that
@@ -83,10 +83,13 @@ loopback backend and approval-gated agent:
 
 When the browser app is running, either plugin connects to it. Otherwise the
 plugin starts its bundled backend without opening a browser; no app-folder
-path is required. Listing/loading an Ollama model starts Ollama if needed. The current
+path is required. Installed models appear before the plugin's **Start** button when
+their local model API is running. **Start** or **Load** can start Ollama if needed. The current
 IDE project root is the agent workspace, and the active editor path is supplied
 with each request. The agent can plan, edit, run checks, inspect diagnostics,
-and repair failures through its existing tools. The tool window/sidebar displays
+and repair failures through its existing tools in **Agent** mode; **Chat** mode
+answers without file or command access. Models without Ollama tool support fall
+back to plain chat even when Agent mode was requested. The tool window/sidebar displays
 the plan, conversation, saved files, and approval requests. MCP tools are opt-in
 and use the same built-in local MCP server and `mcp_servers.json` configuration.
 Both plugins also support local GGUF files and LM Studio's local API. For LM Studio,
