@@ -38,14 +38,16 @@ class Settings:
     thinking_effort: str = "off"
 
     def __post_init__(self) -> None:
-        if self.provider not in {"ollama", "gguf", "npu"}:
-            raise ValueError("Model provider must be ollama, gguf, or npu.")
+        if self.provider not in {"ollama", "gguf", "npu", "lmstudio"}:
+            raise ValueError("Model provider must be ollama, gguf, npu, or lmstudio.")
         if self.thinking_effort not in {"off", "low", "medium", "high"}:
             raise ValueError("Thinking effort must be off, low, medium, or high.")
-        if self.provider == "ollama":
+        if self.provider in {"ollama", "lmstudio"}:
             url = urlparse(self.endpoint)
             if url.scheme not in {"http", "https"} or not url.hostname:
                 raise ValueError("Endpoint must be an http(s) URL.")
+            if self.provider == "lmstudio" and url.hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError("LM Studio must use a local loopback endpoint.")
         if not self.model_name.strip():
             raise ValueError("Model name cannot be empty.")
         if not 0 <= self.temperature <= 2:
@@ -245,4 +247,7 @@ def create_engine(settings: Settings, *, progress=None):
     if settings.provider == "npu":
         from npu_engine import NpuEngine
         return NpuEngine(settings, progress=progress)
+    if settings.provider == "lmstudio":
+        from lmstudio_engine import LMStudioEngine
+        return LMStudioEngine(settings, progress=progress)
     return OllamaEngine(settings, progress=progress)
