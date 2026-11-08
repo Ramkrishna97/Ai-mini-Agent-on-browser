@@ -35,10 +35,13 @@ class Settings:
     max_chunks: int = 200
     provider: str = "ollama"
     keep_alive: str | int = "10m"
+    thinking_effort: str = "off"
 
     def __post_init__(self) -> None:
         if self.provider not in {"ollama", "gguf", "npu"}:
             raise ValueError("Model provider must be ollama, gguf, or npu.")
+        if self.thinking_effort not in {"off", "low", "medium", "high"}:
+            raise ValueError("Thinking effort must be off, low, medium, or high.")
         if self.provider == "ollama":
             url = urlparse(self.endpoint)
             if url.scheme not in {"http", "https"} or not url.hostname:
@@ -139,7 +142,7 @@ class OllamaEngine:
                 model=self.settings.model_name,
                 messages=messages,
                 stream=streaming,
-                think=False,
+                think=False if self.settings.thinking_effort == "off" else self.settings.thinking_effort,
                 **({"format": "json"} if json_output else {}),
                 keep_alive=self.settings.keep_alive,
                 options={
@@ -195,7 +198,8 @@ class OllamaEngine:
         parts, calls, size, final = [], [], 0, None
         try:
             stream = self.client.chat(model=self.settings.model_name, messages=messages, tools=tools,
-                stream=True, think=False, keep_alive=self.settings.keep_alive, options={
+                stream=True, think=False if self.settings.thinking_effort == "off" else self.settings.thinking_effort,
+                keep_alive=self.settings.keep_alive, options={
                     "temperature": self.settings.temperature, "num_predict": self.settings.max_tokens,
                     "num_ctx": self.settings.context_tokens})
             try:
