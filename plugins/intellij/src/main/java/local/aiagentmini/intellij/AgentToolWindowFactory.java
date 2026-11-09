@@ -7,6 +7,9 @@ import com.google.gson.JsonParser;
 import com.intellij.icons.AllIcons;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.ide.plugins.PluginManagerCore;
+import com.intellij.ide.dnd.DnDSupport;
+import com.intellij.ide.dnd.DnDAction;
+import com.intellij.ide.dnd.FileCopyPasteUtil;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.CustomShortcutSet;
@@ -15,6 +18,10 @@ import com.intellij.openapi.actionSystem.ex.CustomComponentAction;
 import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.fileEditor.FileEditorManager;
+import com.intellij.openapi.fileChooser.FileChooser;
+import com.intellij.openapi.fileChooser.FileChooserDescriptor;
+import com.intellij.openapi.vfs.LocalFileSystem;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
@@ -118,7 +125,10 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private final JLabel state = new JLabel("Connecting…");
         private final JPanel approval = new JPanel(new BorderLayout(4, 4));
         private final JButton send = iconButton(AllIcons.Actions.Upload, "Send (Enter)");
-        private final JButton steer = iconButton(AllIcons.Actions.Forward, "Queue follow-up (Alt+Enter); send after current response finishes");
+        private final JPanel attachmentChips = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        private final JScrollPane attachmentScroll = new JScrollPane(attachmentChips,
+                ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER, ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        private List<String> attachmentFiles = List.of();
         private final JButton start = iconButton(AllIcons.Actions.Execute, "Start local agent");
         private final JButton cancel = iconButton(AllIcons.Actions.Suspend, "Stop current request and clear queued messages");
         private final JButton queueState = new JButton();
@@ -158,7 +168,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private record ModelSelection(int provider, String model, String endpoint) {}
         private record PromptRequest(String text, String instruction, ModelSelection selection, int context,
                                      String effort, boolean agent, boolean mcp, boolean browser,
-                                     String skills, String mcpConfig) {}
+                                     String skills, String mcpConfig, List<String> attachments) {}
 
         AgentPanel(Project project) {
             super(new BorderLayout(6, 6));
@@ -418,7 +428,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             prompt.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.SHIFT_DOWN_MASK),
                     DefaultEditorKit.insertBreakAction);
             new DumbAwareAction("Queue follow-up") {
-                @Override public void actionPerformed(@NotNull AnActionEvent event) { steer.doClick(); }
+                @Override public void actionPerformed(@NotNull AnActionEvent event) { capturePrompt(true); }
             }.registerCustomShortcutSet(new CustomShortcutSet(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER,
                     InputEvent.ALT_DOWN_MASK)), prompt, this);
             prompt.getDocument().addDocumentListener(new DocumentListener() {
@@ -432,11 +442,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             });
             bottom.add(promptScroll, BorderLayout.CENTER);
             send.addActionListener(e -> capturePrompt(false));
-            steer.addActionListener(e -> capturePrompt(true));
-            JPanel sendActions = new JPanel(new GridLayout(1, 2, 2, 0));
-            sendActions.add(send);
-            sendActions.add(steer);
-            bottom.add(sendActions, BorderLayout.EAST);
+            bottom.add(send, BorderLayout.EAST);
             JLabel keys = new JLabel("Enter: send · Shift+Enter: line · Alt+Enter: queue");
             keys.setFont(keys.getFont().deriveFont(10f));
             bottom.add(keys, BorderLayout.SOUTH);
@@ -445,7 +451,22 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             queueState.setContentAreaFilled(false);
             queueState.setBorder(JBUI.Borders.empty(2));
             queueState.addActionListener(e -> { queuePaused = false; resumeQueue = true; drainQueue(); });
-            bottom.add(queueState, BorderLayout.NORTH);
+            JPanel draftDetails = new JPanel();
+            draftDetails.setLayout(new BoxLayout(draftDetails, BoxLayout.Y_AXIS));
+            draftDetails.add(queueState);
+            attachmentScroll.setBorder(JBUI.Borders.empty());
+            attachmentScroll.setPreferredSize(JBUI.size(0, 36));
+            attachmentScroll.setVisible(false);
+            draftDetails.add(attachmentScroll);
+            bottom.add(draftDetails, BorderLayout.NORTH);
+            keys.setText(keys.getText() + " · Ctrl+/: files · Drop files to attach");
+            keys.setToolTipText("Attach up to 8 text, PDF or DOCX files, 2 MB each. Click an attachment to remove it.");
+            new DumbAwareAction("Attach project files") {
+                @Override public void actionPerformed(@NotNull AnActionEvent event) { chooseAttachments(); }
+            }.registerCustomShortcutSet(new CustomShortcutSet(KeyStroke.getKeyStroke(KeyEvent.VK_SLASH,
+                    InputEvent.CTRL_DOWN_MASK)), this, this);
+            installFileDrop(prompt);
+            installFileDrop(thread);
             add(bottom, BorderLayout.SOUTH);
             resizeComposer();
             timer = new Timer(1500, e -> { if (started) refresh(); });
@@ -454,6 +475,73 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             state.setToolTipText("Choose a model, then Start. Workspace: " + project.getBasePath());
             if (provider.getSelectedIndex() != 1) execute(() -> listModels());
             updateSelection();
+        }
+
+        private void chooseAttachments() {
+            if (project.getBasePath() == null) { showError(new IOException("Open a local project first.")); return; }
+            VirtualFile root = LocalFileSystem.getInstance().findFileByPath(project.getBasePath());
+            if (root == null) { showError(new IOException("Project directory is unavailable.")); return; }
+            FileChooserDescriptor descriptor = new FileChooserDescriptor(true, false, false, false, false, true)
+                    .withRoots(root).withShowFileSystemRoots(false);
+            descriptor.setTitle("Attach Project Files (up to 8, 2 MB each)");
+            descriptor.setForcedToUseIdeaFileChooser(true);
+            VirtualFile[] chosen = FileChooser.chooseFiles(descriptor, project, root);
+            try {
+                List<Path> files = new ArrayList<>();
+                for (VirtualFile file : chosen) {
+                    Path path = Path.of(file.getPath());
+                    if (!AttachmentFiles.withinProject(path, Path.of(project.getBasePath())))
+                        throw new IOException("Choose files within the current project.");
+                    files.add(path);
+                }
+                addAttachments(files);
+            } catch (IOException error) { showError(error); }
+        }
+
+        private static List<Path> droppedFiles(Object attached) {
+            List<VirtualFile> virtual = FileCopyPasteUtil.getVirtualFileListFromAttachedObject(attached);
+            if (virtual != null && !virtual.isEmpty())
+                return virtual.stream().map(file -> Path.of(file.getPath())).toList();
+            List<java.io.File> files = FileCopyPasteUtil.getFileListFromAttachedObject(attached);
+            return files == null ? List.of() : files.stream().map(java.io.File::toPath).toList();
+        }
+
+        private void installFileDrop(JComponent component) {
+            DnDSupport.createBuilder(component).setDisposableParent(this)
+                    .setTargetChecker(event -> {
+                        boolean files = !droppedFiles(event.getAttachedObject()).isEmpty();
+                        if (files) event.updateAction(DnDAction.COPY);
+                        event.setDropPossible(files, files ? "Attach read-only reference files" : "Drop files to attach");
+                        return !files;
+                    })
+                    .setDropHandler(event -> addAttachments(droppedFiles(event.getAttachedObject())))
+                    .install();
+        }
+
+        private void addAttachments(List<Path> files) {
+            try {
+                attachmentFiles = AttachmentFiles.merge(attachmentFiles, files);
+                updateAttachments();
+                prompt.requestFocusInWindow();
+            } catch (IOException error) { showError(error); }
+        }
+
+        private void updateAttachments() {
+            attachmentChips.removeAll();
+            for (String file : attachmentFiles) {
+                JButton chip = new JButton(Path.of(file).getFileName() + " ×");
+                chip.setToolTipText(file + " — click to remove");
+                chip.setMargin(JBUI.insets(1, 5));
+                chip.addActionListener(event -> {
+                    attachmentFiles = attachmentFiles.stream().filter(path -> !path.equals(file)).toList();
+                    updateAttachments();
+                });
+                attachmentChips.add(chip);
+            }
+            attachmentScroll.setVisible(!attachmentFiles.isEmpty());
+            attachmentChips.revalidate();
+            attachmentChips.repaint();
+            revalidate();
         }
 
         private boolean toolbarFitsOneRow() {
@@ -501,6 +589,8 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private void newChat() {
             conversationEpoch++;
             queued.clear();
+            attachmentFiles = List.of();
+            updateAttachments();
             queuePaused = false;
             resumeQueue = false;
             updateQueueLabel();
@@ -536,10 +626,13 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             }
             PromptRequest request = new PromptRequest(text, activeFile + text, selected,
                     (Integer) contextTokens.getValue(), thinkingAvailable ? String.valueOf(effort.getSelectedItem()) : "off",
-                    mode.isSelected(), mcp.isSelected(), browser.isSelected(), extraSkillRoot, extraMcpConfig);
+                    mode.isSelected(), mcp.isSelected(), browser.isSelected(), extraSkillRoot, extraMcpConfig,
+                    List.copyOf(attachmentFiles));
             if (queue) {
                 queued.add(request);
                 prompt.setText("");
+                attachmentFiles = List.of();
+                updateAttachments();
                 updateQueueLabel();
                 if (!started) execute(() -> { ensureBackend(); started = true; refreshNow(); });
                 else drainQueue();
@@ -555,7 +648,13 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     submit(request);
                     SwingUtilities.invokeLater(() -> {
                         if (epoch != conversationEpoch) return;
-                        if (!fromQueue && prompt.getText().trim().equals(request.text())) prompt.setText("");
+                        if (!fromQueue && prompt.getText().trim().equals(request.text())) {
+                            prompt.setText("");
+                            if (attachmentFiles.equals(request.attachments())) {
+                                attachmentFiles = List.of();
+                                updateAttachments();
+                            }
+                        }
                     });
                 } catch (Exception error) {
                     SwingUtilities.invokeLater(() -> {
@@ -930,13 +1029,17 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             properties.setValue("aiAgentMini.mcp", useMcp);
             properties.setValue("aiAgentMini.browser", useBrowser);
             JsonObject request = new JsonObject();
+            JsonArray attachments = new JsonArray();
+            promptRequest.attachments().forEach(attachments::add);
+            request.add("attachments", attachments);
+            request.addProperty("lazy_tools", !useAgent);
             if (lastStatus != null && lastStatus.has("chat_ready") && lastStatus.get("chat_ready").getAsBoolean()
                     && source.equals(string(lastStatus, "provider")) && chosenModel.equals(string(lastStatus, "model"))
                     && lastStatus.has("conversation") && lastStatus.getAsJsonArray("conversation").size() > 0) {
                 request.addProperty("question", instruction);
                 request.addProperty("agent_mode", useAgent);
                 request.addProperty("chat_only", !useAgent);
-                request.addProperty("mcp", useAgent && useMcp);
+                request.addProperty("mcp", useMcp);
                 request.addProperty("browser", useBrowser);
                 request.addProperty("thinking_effort", chosenEffort);
                 api("/api/chat", request);
@@ -959,7 +1062,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 }
                 request.addProperty("agent_mode", useAgent);
                 request.addProperty("chat_only", !useAgent);
-                request.addProperty("mcp", useAgent && useMcp);
+                request.addProperty("mcp", useMcp);
                 request.addProperty("browser", useBrowser);
                 request.addProperty("thinking_effort", chosenEffort);
                 request.addProperty("max_tokens", 4096);
@@ -1007,15 +1110,16 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             boolean atBottom = scroll.getValue() + scroll.getVisibleAmount() >= scroll.getMaximum() - 24;
             int previous = scroll.getValue();
             thread.removeAll();
-            int width = Math.max(170, Math.min(480, (int) (transcriptScroll.getViewport().getWidth() * 0.78)));
+            int availableWidth = Math.max(170, transcriptScroll.getViewport().getWidth() - 14);
             if (status.has("conversation") && status.get("conversation").isJsonArray()) {
                 int index = 0;
                 for (JsonElement item : status.getAsJsonArray("conversation")) {
                     if (item.isJsonObject()) {
                         JsonObject message = item.getAsJsonObject();
                         JPanel row = new JPanel(new BorderLayout());
-                        row.add(messageBubble(message, index, width),
-                                "user".equals(string(message, "role")) ? BorderLayout.WEST : BorderLayout.EAST);
+                        boolean user = "user".equals(string(message, "role"));
+                        int width = user ? Math.max(170, Math.min(640, (int) (availableWidth * 0.75))) : availableWidth;
+                        row.add(messageBubble(message, index, width), user ? BorderLayout.WEST : BorderLayout.CENTER);
                         row.setAlignmentX(Component.LEFT_ALIGNMENT);
                         row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
                         thread.add(row);
@@ -1131,6 +1235,14 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             heading.setFont(heading.getFont().deriveFont(Font.BOLD));
             bubble.add(heading, BorderLayout.NORTH);
             bubble.add(wrappedText(string(message, "text"), width - 20, background), BorderLayout.CENTER);
+            if (user && message.has("attachments") && message.get("attachments").isJsonArray()) {
+                StringBuilder names = new StringBuilder();
+                for (JsonElement file : message.getAsJsonArray("attachments")) {
+                    if (!names.isEmpty()) names.append(" · ");
+                    names.append(Path.of(file.getAsString()).getFileName());
+                }
+                if (!names.isEmpty()) bubble.add(wrappedText("Files: " + names, width - 20, background), BorderLayout.SOUTH);
+            }
             if (!user) {
                 JsonArray steps = message.has("steps") && message.get("steps").isJsonArray()
                         ? message.getAsJsonArray("steps") : new JsonArray();
