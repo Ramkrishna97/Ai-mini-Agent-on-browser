@@ -8,6 +8,8 @@ version = '0.2.0'
 
 repositories { mavenCentral() }
 
+dependencies { testImplementation 'junit:junit:4.13.2' }
+
 intellij {
     // Download a compatible Community IDE by default; allow a local installation as an override.
     if (providers.gradleProperty('ideaPath').isPresent()) {
