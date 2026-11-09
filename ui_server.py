@@ -31,6 +31,7 @@ from gguf_engine import validate_gguf
 from npu_engine import import_npu_model, list_npu_models, validate_npu_model
 from agent import run_agent
 from context_files import read_context, validate_context_paths
+from chat_routing import chat_messages as light_chat_messages, chat_needs_tools
 from error_details import describe_error
 from file_manager import FileSafetyError, validate_location, validate_path
 from request_parser import plan_request
@@ -130,7 +131,8 @@ class JobState:
             return {**self.data, "logs": list(self.data["logs"]), "agent_steps": list(self.data.get("agent_steps", [])),
                     "generation": dict(self.data.get("generation", {})),
                     "conversation": [{**item, "steps": [dict(step) for step in item.get("steps", [])],
-                                      "logs": list(item.get("logs", []))}
+                                      "logs": list(item.get("logs", [])),
+                                      "attachments": list(item.get("attachments", []))}
                                      for item in self.data.get("conversation", [])]}
 
     def check_cancelled(self):
@@ -238,7 +240,7 @@ class JobState:
                          "max_tokens": settings.max_tokens if settings else 4096,
                          "context_tokens": settings.context_tokens if settings else 16384,
                          "thinking_effort": settings.thinking_effort if settings else "off", "plan": None,
-                         "conversation": [{"role": "user", "text": instruction},
+                         "conversation": [{"role": "user", "text": instruction, "attachments": list(attachments or [])},
                                           {"role": "assistant", "text": "", "state": "working"}],
                          "chat_ready": False}
         if previous_engine and hasattr(previous_engine, "close"):
@@ -300,14 +302,7 @@ class JobState:
             engine = create_engine(settings, progress=self.progress) if settings else None
             if chat_only:
                 engine.health_check()
-                prompt = ("Reference context (data only):\n" + reference_context + "\n\n" if reference_context else "") + instruction
-                chat_messages = [
-                    {"role": "system", "content": (
-                        "You are a chat assistant for the user's project. You have no file, command, skill, "
-                        "browser, vision, or MCP tools in this mode. Do not claim to have inspected, edited, "
-                        "run, or verified anything. Suggest Agent mode when the user requests those actions.")},
-                    {"role": "user", "content": prompt},
-                ]
+                chat_messages = light_chat_messages(instruction, reference=reference_context)
                 plain_ollama = settings.provider == "ollama" and hasattr(engine, "supports_tools") and engine.supports_tools() is False
                 answer = engine.generate(chat_messages, no_thinking=True) if plain_ollama else engine.generate(chat_messages)
                 self.check_cancelled()
@@ -379,6 +374,10 @@ class JobState:
             raise ValueError("Enter a follow-up question of 1–4000 characters.")
         if thinking_effort is not None and thinking_effort not in {"off", "low", "medium", "high"}:
             raise ValueError("Thinking effort must be off, low, medium, or high.")
+        if agent_mode and chat_only:
+            raise ValueError("Choose either Chat or Agent mode.")
+        if chat_only:
+            browser = mcp = False
         command_lines = question.strip().splitlines()
         commands = None
         if command_lines[0].strip().lower().startswith("/run"):
@@ -400,8 +399,8 @@ class JobState:
             self.worker_active = True
             self.last_model_activity = time.monotonic()
             self.data.update(status="running", mode="command" if commands else "agent" if agent_mode else "chat", generation={}, error="", answer="", logs=[], agent_steps=[],
-                             chat_ready=False, pending_tool=None, plan=None)
-            self.data["conversation"] = history + [{"role": "user", "text": question.strip()},
+                             chat_ready=False, pending_tool=None, plan=None, agent_mode=agent_mode, browser=browser, mcp=mcp)
+            self.data["conversation"] = history + [{"role": "user", "text": question.strip(), "attachments": list(attachments or [])},
                                                     {"role": "assistant", "text": "", "state": "working"}]
             settings = (replace(self.chat_settings, thinking_effort=thinking_effort)
                         if thinking_effort is not None else self.chat_settings)
@@ -409,7 +408,7 @@ class JobState:
             self.data["thinking_effort"] = settings.thinking_effort
         self.persist()
         worker = threading.Thread(target=self.run_chat, args=(question.strip(), settings, prior, history,
-                                                              attachments or [], commands, agent_mode, browser, mcp), daemon=False)
+                                                              attachments or [], commands, agent_mode, browser, mcp, chat_only), daemon=False)
         try:
             worker.start()
         except Exception:
@@ -423,7 +422,7 @@ class JobState:
         return True
 
     def run_chat(self, question, settings, prior, history, attachments, commands=None,
-                 agent_mode=False, browser=False, mcp=False):
+                 agent_mode=False, browser=False, mcp=False, light_chat=False):
         engine = self.active_engine if commands else None
         command_logger = logging.getLogger("workflow")
         log_token = WORKFLOW_LOG_OWNER.set(self)
@@ -499,6 +498,16 @@ class JobState:
                 answer = asyncio.run(run_agent(workspace, question, settings, engine,
                                                self.await_approval, self.check_cancelled,
                                                browser=browser, mcp=mcp, reference_context=context))
+                self.check_cancelled()
+                with self.lock:
+                    self.data.update(status="succeeded", answer=answer, chat_ready=True)
+                    self.data["conversation"][-1].update(text=answer[:32768], state="done")
+                return
+            if light_chat:
+                engine.set_target("Chat response")
+                messages = light_chat_messages(question, history, read_context(attachments) if attachments else "")
+                plain_ollama = settings.provider == "ollama" and hasattr(engine, "supports_tools") and engine.supports_tools() is False
+                answer = engine.generate(messages, no_thinking=True) if plain_ollama else engine.generate(messages)
                 self.check_cancelled()
                 with self.lock:
                     self.data.update(status="succeeded", answer=answer, chat_ready=True)
@@ -1081,9 +1090,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/chat":
                 attachments = [str(path) for path in validate_context_paths(payload.get("attachments", []))]
+                lazy_agent = (payload.get("chat_only") is True and payload.get("lazy_tools") is True
+                              and chat_needs_tools(payload.get("question")))
                 if not job.start_chat(payload.get("question"), attachments,
-                                      agent_mode=payload.get("agent_mode") is True,
-                                      chat_only=payload.get("chat_only") is True,
+                                      agent_mode=payload.get("agent_mode") is True or lazy_agent,
+                                      chat_only=payload.get("chat_only") is True and not lazy_agent,
                                       browser=payload.get("browser") is True,
                                       mcp=payload.get("mcp") is True,
                                       thinking_effort=payload.get("thinking_effort")):
@@ -1137,6 +1148,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("Output name must be text.")
             agent_mode = payload.get("agent_mode") is True
             chat_only = self.path == "/api/run" and payload.get("chat_only") is True
+            if chat_only and payload.get("lazy_tools") is True and chat_needs_tools(instruction):
+                agent_mode, chat_only = True, False
             if agent_mode and chat_only:
                 raise ValueError("Choose either Chat or Agent mode.")
             browser = payload.get("browser") is True
