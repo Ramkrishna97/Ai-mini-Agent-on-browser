@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.intellij.icons.AllIcons;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -12,6 +13,7 @@ import com.intellij.openapi.wm.ToolWindow;
 import com.intellij.openapi.wm.ToolWindowFactory;
 import com.intellij.ui.content.Content;
 import com.intellij.ui.content.ContentFactory;
+import com.intellij.util.ui.JBUI;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.*;
@@ -58,23 +60,30 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private final JTextField endpoint = new JTextField("http://localhost:1234");
         private final JButton chooseGguf = new JButton("Choose GGUF file");
         private final JLabel ggufLabel = new JLabel("No GGUF selected");
-        private final JButton refreshModels = new JButton("Refresh models");
-        private final JButton load = new JButton("Load model");
-        private final JPanel modelRow = new JPanel(new BorderLayout(4, 0));
+        private final JButton refreshModels = iconButton(AllIcons.Actions.Refresh, "Refresh models");
+        private final JButton load = iconButton(AllIcons.Actions.Download, "Load selected model");
+        private final JPanel modelRow = new JPanel(new CardLayout());
+        private final JButton ggufQuick = new JButton("Choose GGUF…");
         private final JPanel ggufRow = new JPanel(new BorderLayout(4, 0));
         private final JPanel endpointRow = new JPanel(new BorderLayout(4, 0));
-        private final JPanel lmSourcesRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        private final JPanel lmSourcesRow = new JPanel(new BorderLayout(0, 4));
         private final JLabel lmSourcesLabel = new JLabel("No extra sources selected");
+        private final JLabel advancedHint = new JLabel("No additional settings for Ollama.");
         private final JComboBox<String> model = new JComboBox<>();
         private final JSpinner contextTokens = new JSpinner(new SpinnerNumberModel(16384, 16384, 262144, 1024));
         private final JComboBox<String> effort = new JComboBox<>(new String[]{"off", "low", "medium", "high"});
-        private final JComboBox<String> mode = new JComboBox<>(new String[]{"Agent · plan and edit", "Chat · answer only"});
-        private final JCheckBox mcp = new JCheckBox("MCP tools");
-        private final JCheckBox browser = new JCheckBox("Browser tools");
+        private final JComboBox<String> mode = new JComboBox<>(new String[]{"Agent", "Chat"});
+        private final JCheckBox mcp = new JCheckBox("MCP");
+        private final JCheckBox browser = new JCheckBox("Web");
         private final JPanel thread = new JPanel();
         private final JScrollPane transcriptScroll = new JScrollPane(thread);
         private final JPanel options = new JPanel();
-        private final JButton optionsToggle = new JButton("⚙ Options");
+        private final JButton optionsToggle = iconButton(AllIcons.General.Settings, "Advanced settings");
+        private final JPopupMenu optionsPopup = new JPopupMenu();
+        private final JPanel planPanel = new JPanel(new BorderLayout());
+        private final JToggleButton planToggle = new JToggleButton("Plan");
+        private final JTextArea planText = new JTextArea();
+        private final JScrollPane planScroll = new JScrollPane(planText);
         private final Set<Integer> expandedActivity = new HashSet<>();
         private final JTextArea prompt = new JTextArea(4, 20);
         private final JLabel state = new JLabel("Connecting…");
@@ -106,15 +115,10 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             model.addItem("Choose model");
             model.setEditable(false);
 
-            setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
-            JPanel top = new JPanel();
-            top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
-            JLabel title = new JLabel("✦  AI Agent Mini");
-            title.setFont(title.getFont().deriveFont(Font.BOLD, 13f));
-            title.setBorder(BorderFactory.createEmptyBorder(2, 3, 3, 3));
-            top.add(title);
-            JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
-            JButton start = new JButton("▶ Start");
+            setBorder(JBUI.Borders.empty(4));
+            JPanel top = new JPanel(new BorderLayout(0, 3));
+            JPanel actions = new JPanel(new GridBagLayout());
+            JButton start = iconButton(AllIcons.Actions.Execute, "Start local agent");
             start.addActionListener(e -> execute(() -> {
                 SwingUtilities.invokeLater(() -> state.setText("Starting local agent…"));
                 ensureBackend();
@@ -127,8 +131,8 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 try { listModels(); }
                 catch (Exception error) { SwingUtilities.invokeLater(() -> state.setText(error.getMessage())); }
             }));
-            actions.add(start);
-            JButton newChat = new JButton("New chat");
+            toolbarCell(actions, start, 0, 0);
+            JButton newChat = iconButton(AllIcons.General.Add, "New chat");
             newChat.addActionListener(e -> execute(() -> {
                 ensureBackend();
                 started = true;
@@ -139,8 +143,8 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 SwingUtilities.invokeLater(expandedActivity::clear);
                 refreshNow();
             }));
-            actions.add(newChat);
-            JButton cancel = new JButton("Stop");
+            toolbarCell(actions, newChat, 1, 0);
+            JButton cancel = iconButton(AllIcons.Actions.Suspend, "Stop current request");
             cancel.addActionListener(e -> execute(() -> {
                 if (!started) {
                     SwingUtilities.invokeLater(() -> state.setText("No request is running."));
@@ -149,9 +153,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 api("/api/cancel", new JsonObject());
                 refreshNow();
             }));
-            actions.add(cancel);
-            top.add(actions);
-            top.add(provider);
+            toolbarCell(actions, cancel, 2, 0);
+            compactControl(provider, 94, "Model source: Ollama, local GGUF, or LM Studio API");
+            toolbarCell(actions, provider, 3, 0);
             chooseGguf.addActionListener(e -> {
                 JFileChooser chooser = new JFileChooser();
                 chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("GGUF model", "gguf"));
@@ -160,22 +164,29 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     selectedModel = ggufPath;
                     ggufLabel.setText(chooser.getSelectedFile().getName());
                     properties.setValue("aiAgentMini.gguf", ggufPath);
+                    updateProviderUi();
                 }
             });
             ggufRow.add(chooseGguf, BorderLayout.WEST);
             ggufRow.add(ggufLabel, BorderLayout.CENTER);
-            modelRow.add(model, BorderLayout.CENTER);
+            compactControl(model, 160, "Choose a model, then click the load icon");
+            ggufQuick.addActionListener(e -> chooseGguf.doClick());
+            compactControl(ggufQuick, 160, "Choose a local GGUF file");
+            modelRow.add(model, "model");
+            modelRow.add(ggufQuick, "gguf");
+            modelRow.setMinimumSize(JBUI.size(55, 24));
+            toolbarCell(actions, modelRow, 4, 1);
             refreshModels.addActionListener(e -> execute(() -> listModels()));
-            JPanel modelActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 2, 0));
-            modelActions.add(refreshModels);
-            modelActions.add(load);
-            modelRow.add(modelActions, BorderLayout.EAST);
+            toolbarCell(actions, refreshModels, 5, 0);
+            toolbarCell(actions, load, 6, 0);
+            toolbarCell(actions, optionsToggle, 7, 0);
+            top.add(actions, BorderLayout.NORTH);
             endpointRow.add(endpoint, BorderLayout.CENTER);
+            endpoint.setToolTipText("LM Studio local API URL");
+            endpointRow.add(new JLabel("API "), BorderLayout.WEST);
             JButton connectLm = new JButton("Connect");
             connectLm.addActionListener(e -> execute(() -> listModels()));
             endpointRow.add(connectLm, BorderLayout.EAST);
-            top.add(modelRow);
-            top.add(ggufRow);
             JButton chooseSkills = new JButton("Skill folder");
             chooseSkills.addActionListener(e -> {
                 JFileChooser chooser = new JFileChooser();
@@ -194,9 +205,11 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     updateSourceLabel();
                 }
             });
-            lmSourcesRow.add(chooseSkills);
-            lmSourcesRow.add(chooseMcp);
-            lmSourcesRow.add(lmSourcesLabel);
+            JPanel sourceActions = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+            sourceActions.add(chooseSkills);
+            sourceActions.add(chooseMcp);
+            lmSourcesRow.add(sourceActions, BorderLayout.NORTH);
+            lmSourcesRow.add(lmSourcesLabel, BorderLayout.SOUTH);
             provider.addActionListener(e -> {
                 properties.setValue("aiAgentMini.provider", Integer.toString(provider.getSelectedIndex()));
                 selectedModel = provider.getSelectedIndex() == 1 ? ggufPath : "";
@@ -204,7 +217,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 if (provider.getSelectedIndex() != 1) execute(() -> listModels());
             });
             updateProviderUi();
-            JPanel settings = new JPanel(new GridLayout(0, 2, 4, 2));
+            JPanel settings = new JPanel(new GridBagLayout());
             load.addActionListener(e -> {
                 String chosenModel = String.valueOf(model.getSelectedItem());
                 execute(() -> {
@@ -227,30 +240,47 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 refreshNow();
                 });
             });
-            settings.add(new JLabel("Mode"));
-            settings.add(mode);
-            settings.add(new JLabel("Thinking"));
-            settings.add(effort);
-            settings.add(new JLabel("Context"));
-            settings.add(contextTokens);
-            settings.add(mcp);
-            settings.add(browser);
+            compactControl(mode, 70, "Mode: Agent can plan, edit and run with approval; Chat only answers");
+            compactControl(effort, 70, "Thinking effort: off, low, medium, high");
+            compactControl(contextTokens, 80, "Context window (tokens)");
+            effort.setRenderer(new DefaultListCellRenderer() {
+                @Override public Component getListCellRendererComponent(JList<?> list, Object value, int index,
+                                                                        boolean selected, boolean focused) {
+                    String label = "medium".equals(value) ? "Med" : String.valueOf(value);
+                    if (!label.isEmpty()) label = Character.toUpperCase(label.charAt(0)) + label.substring(1);
+                    return super.getListCellRendererComponent(list, label, index, selected, focused);
+                }
+            });
+            mcp.setToolTipText("Enable MCP tools; tool calls require approval");
+            mcp.getAccessibleContext().setAccessibleName("MCP tools");
+            browser.setToolTipText("Enable browser tools");
+            browser.getAccessibleContext().setAccessibleName("Browser tools");
+            mcp.setMargin(JBUI.emptyInsets());
+            browser.setMargin(JBUI.emptyInsets());
+            toolbarCell(settings, mode, 0, 0);
+            toolbarCell(settings, effort, 1, 0);
+            toolbarCell(settings, contextTokens, 2, 0);
+            toolbarCell(settings, mcp, 3, 0);
+            toolbarCell(settings, browser, 4, 0);
+            state.setFont(state.getFont().deriveFont(Math.max(11f, state.getFont().getSize2D() - 1)));
+            state.setMinimumSize(JBUI.size(0, 24));
+            toolbarCell(settings, state, 5, 1);
             options.setLayout(new BoxLayout(options, BoxLayout.Y_AXIS));
+            options.setBorder(JBUI.Borders.empty(8));
+            options.add(advancedHint);
+            options.add(ggufRow);
             options.add(endpointRow);
             options.add(lmSourcesRow);
-            options.add(settings);
-            options.setVisible(false);
-            optionsToggle.setAlignmentX(Component.LEFT_ALIGNMENT);
+            optionsPopup.add(options);
             optionsToggle.addActionListener(e -> {
-                options.setVisible(!options.isVisible());
-                optionsToggle.setText(options.isVisible() ? "▾ Options" : "⚙ Options");
-                top.revalidate();
-                top.repaint();
+                if (optionsPopup.isVisible()) optionsPopup.setVisible(false);
+                else {
+                    optionsPopup.setPopupSize(JBUI.scale(350), options.getPreferredSize().height + JBUI.scale(6));
+                    optionsPopup.show(optionsToggle, optionsToggle.getWidth() - optionsPopup.getPreferredSize().width,
+                            optionsToggle.getHeight());
+                }
             });
-            top.add(optionsToggle);
-            top.add(options);
-            state.setBorder(BorderFactory.createEmptyBorder(3, 3, 3, 3));
-            top.add(state);
+            top.add(settings, BorderLayout.SOUTH);
             add(top, BorderLayout.NORTH);
 
             thread.setLayout(new BoxLayout(thread, BoxLayout.Y_AXIS));
@@ -258,6 +288,25 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             transcriptScroll.setBorder(BorderFactory.createEmptyBorder());
             transcriptScroll.getVerticalScrollBar().setUnitIncrement(16);
             JPanel center = new JPanel(new BorderLayout(4, 4));
+            planToggle.setHorizontalAlignment(SwingConstants.LEFT);
+            planToggle.setContentAreaFilled(false);
+            planToggle.setBorder(JBUI.Borders.empty(3, 5));
+            planToggle.setToolTipText("Expand or collapse the current plan");
+            planToggle.getAccessibleContext().setAccessibleName("Current plan");
+            planText.setEditable(false);
+            planText.setLineWrap(true);
+            planText.setWrapStyleWord(true);
+            planText.setMargin(JBUI.insets(4));
+            planScroll.setPreferredSize(JBUI.size(0, 90));
+            planScroll.setVisible(false);
+            planToggle.addActionListener(e -> {
+                planScroll.setVisible(planToggle.isSelected());
+                planPanel.revalidate();
+            });
+            planPanel.add(planToggle, BorderLayout.NORTH);
+            planPanel.add(planScroll, BorderLayout.CENTER);
+            planPanel.setVisible(false);
+            center.add(planPanel, BorderLayout.NORTH);
             center.add(transcriptScroll, BorderLayout.CENTER);
             approval.setVisible(false);
             center.add(approval, BorderLayout.SOUTH);
@@ -303,20 +352,59 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             add(bottom, BorderLayout.SOUTH);
             timer = new Timer(1500, e -> { if (started) refresh(); });
             timer.start();
-            state.setText("Choose a model, then Start");
+            state.setText("Ready");
+            state.setToolTipText("Choose a model, then Start. Workspace: " + project.getBasePath());
             if (provider.getSelectedIndex() != 1) execute(() -> listModels());
         }
 
         private void updateProviderUi() {
             int index = provider.getSelectedIndex();
-            modelRow.setVisible(index != 1);
+            ((CardLayout) modelRow.getLayout()).show(modelRow, index == 1 ? "gguf" : "model");
             ggufRow.setVisible(index == 1);
             endpointRow.setVisible(index == 2);
             lmSourcesRow.setVisible(index == 2);
             load.setVisible(index != 1);
-            load.setText(index == 2 ? "Load in LM Studio" : "Load model");
-            if (!ggufPath.isBlank()) ggufLabel.setText(Path.of(ggufPath).getFileName().toString());
+            refreshModels.setEnabled(index != 1);
+            load.setToolTipText(index == 2 ? "Load selected model in LM Studio" : "Load selected Ollama model");
+            advancedHint.setText(index == 0 ? "No additional settings for Ollama."
+                    : index == 1 ? "Local GGUF file (loads on first request)" : "LM Studio local sources");
+            if (!ggufPath.isBlank()) {
+                String name = Path.of(ggufPath).getFileName().toString();
+                ggufLabel.setText(name.length() > 32 ? name.substring(0, 29) + "…" : name);
+                ggufLabel.setToolTipText(ggufPath);
+                ggufQuick.setText(name.length() > 24 ? name.substring(0, 21) + "…" : name);
+                ggufQuick.setToolTipText(ggufPath);
+            }
             revalidate();
+        }
+
+        private static JButton iconButton(Icon icon, String name) {
+            JButton button = new JButton(icon);
+            button.setToolTipText(name);
+            button.getAccessibleContext().setAccessibleName(name);
+            button.setMargin(JBUI.emptyInsets());
+            button.setPreferredSize(JBUI.size(24, 24));
+            button.setMinimumSize(JBUI.size(24, 24));
+            return button;
+        }
+
+        private static void compactControl(JComponent control, int width, String name) {
+            control.setPreferredSize(JBUI.size(width, 24));
+            control.setMinimumSize(JBUI.size(45, 24));
+            control.setToolTipText(name);
+            control.getAccessibleContext().setAccessibleName(name);
+            control.setFont(control.getFont().deriveFont(Math.max(11f, control.getFont().getSize2D() - 1)));
+        }
+
+        private static void toolbarCell(JPanel row, JComponent control, int column, double weight) {
+            GridBagConstraints constraints = new GridBagConstraints();
+            constraints.gridx = column;
+            constraints.gridy = 0;
+            constraints.weightx = weight;
+            constraints.fill = GridBagConstraints.HORIZONTAL;
+            constraints.anchor = GridBagConstraints.WEST;
+            constraints.insets = JBUI.insets(0, column == 0 ? 0 : 3, 0, 0);
+            row.add(control, constraints);
         }
 
         private void updateSourceLabel() {
@@ -583,16 +671,18 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     ? string(status.getAsJsonObject("model_preload"), "phase") : "";
             JsonObject lmPreload = status.has("lmstudio_preload") && status.get("lmstudio_preload").isJsonObject()
                     ? status.getAsJsonObject("lmstudio_preload") : new JsonObject();
-            state.setText(project.getName() + "  ·  " + string(status, "status")
-                    + (("loading".equals(phase) || "loading".equals(string(lmPreload, "phase"))) ? "  ·  Loading model" : "")
-                    + (lmPreload.has("error") && !string(lmPreload, "error").isBlank() ? "  ·  " + string(lmPreload, "error") : "")
-                    + (status.has("error") ? "  ·  " + string(status, "error") : ""));
-            state.setToolTipText(project.getBasePath());
+            String error = string(status, "error");
+            if (error.isBlank()) error = string(lmPreload, "error");
+            boolean modelLoading = "loading".equals(phase) || "loading".equals(string(lmPreload, "phase"));
+            state.setText(!error.isBlank() ? "Error" : modelLoading ? "Loading…" : string(status, "status"));
+            state.setToolTipText(project.getBasePath() + " · " + string(status, "status")
+                    + (error.isBlank() ? "" : " · " + error));
             boolean loading = status.has("model_preload") && status.get("model_preload").isJsonObject()
                     && status.getAsJsonObject("model_preload").has("busy")
                     && status.getAsJsonObject("model_preload").get("busy").getAsBoolean();
             loading |= lmPreload.has("busy") && lmPreload.get("busy").getAsBoolean();
             send.setEnabled(!"running".equals(string(status, "status")) && !loading);
+            renderPlan(status);
             JScrollBar scroll = transcriptScroll.getVerticalScrollBar();
             boolean atBottom = scroll.getValue() + scroll.getVisibleAmount() >= scroll.getMaximum() - 24;
             int previous = scroll.getValue();
@@ -648,6 +738,30 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 approval.setVisible(false);
             }
             revalidate();
+        }
+
+        private void renderPlan(JsonObject status) {
+            JsonObject plan = status.has("plan") && status.get("plan").isJsonObject()
+                    ? status.getAsJsonObject("plan") : new JsonObject();
+            JsonArray steps = plan.has("steps") && plan.get("steps").isJsonArray()
+                    ? plan.getAsJsonArray("steps") : new JsonArray();
+            planPanel.setVisible(steps.size() > 0);
+            if (steps.isEmpty()) {
+                planToggle.setSelected(false);
+                planScroll.setVisible(false);
+                return;
+            }
+            int current = plan.has("current") && plan.get("current").isJsonPrimitive()
+                    ? plan.get("current").getAsInt() : -1;
+            planToggle.setText("Plan · " + steps.size() + " steps"
+                    + (current >= 0 && current < steps.size() ? " · step " + (current + 1) : ""));
+            StringBuilder text = new StringBuilder();
+            for (int index = 0; index < steps.size(); index++) {
+                text.append(index == current ? "→ " : "   ").append(index + 1).append(". ")
+                        .append(steps.get(index).getAsString()).append('\n');
+            }
+            String updated = text.toString();
+            if (!updated.equals(planText.getText())) planText.setText(updated);
         }
 
         private JPanel messageBubble(JsonObject message, int index, int width) {
