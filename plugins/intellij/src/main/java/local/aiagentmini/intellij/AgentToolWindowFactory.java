@@ -123,6 +123,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private final JButton cancel = iconButton(AllIcons.Actions.Suspend, "Stop current request and clear queued messages");
         private final JButton queueState = new JButton();
         private final JPanel toolbar = new JPanel(new BorderLayout(0, 3));
+        private final ModelLoadingBar loadingBar = new ModelLoadingBar(JBUI.scale(6));
+        private String loadingIndicatorKey = "";
+        private boolean loadAcknowledgementPending;
         private final JComboBox<String> sortModels = new JComboBox<>(new String[]{"Name A–Z", "Size: smallest first"});
         private final Map<String, JsonObject> catalog = new HashMap<>();
         private final Map<String, Boolean> thinkingCache = new HashMap<>();
@@ -298,6 +301,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     return;
                 }
                 loadingModel = true;
+                loadingIndicatorKey = (chosen.provider() == 2 ? "lmstudio:" : "ollama:") + chosenModel;
+                loadAcknowledgementPending = true;
+                loadingBar.begin();
                 send.setEnabled(false);
                 execute(() -> {
                 try {
@@ -316,9 +322,15 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                     request.addProperty("context_tokens", context);
                     api("/api/lmstudio/load", request);
                 }
+                SwingUtilities.invokeLater(() -> loadAcknowledgementPending = false);
                 refreshNow();
                 } catch (Exception error) {
-                    SwingUtilities.invokeLater(() -> { loadingModel = false; showError(error); });
+                    SwingUtilities.invokeLater(() -> {
+                        loadAcknowledgementPending = false;
+                        loadingModel = false;
+                        loadingBar.finish(false);
+                        showError(error);
+                    });
                 }
                 });
             });
@@ -363,6 +375,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 }
             });
             layoutToolbar();
+            top.add(loadingBar, BorderLayout.SOUTH);
             add(top, BorderLayout.NORTH);
 
             thread.setLayout(new BoxLayout(thread, BoxLayout.Y_AXIS));
@@ -664,7 +677,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             if (!polling.compareAndSet(false, true)) return;
             executor.execute(() -> {
                 try { refreshNow(); }
-                catch (Exception error) { SwingUtilities.invokeLater(() -> showError(error)); }
+                catch (Exception error) { SwingUtilities.invokeLater(() -> { loadingBar.finish(false); showError(error); }); }
                 finally { polling.set(false); }
             });
         }
@@ -970,6 +983,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         }
 
         private void render(JsonObject status) {
+            updateLoadingIndicator(status);
             String phase = status.has("model_preload") && status.get("model_preload").isJsonObject()
                     ? string(status.getAsJsonObject("model_preload"), "phase") : "";
             JsonObject lmPreload = status.has("lmstudio_preload") && status.get("lmstudio_preload").isJsonObject()
@@ -1045,6 +1059,37 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             }
             revalidate();
             drainQueue();
+        }
+
+        private void updateLoadingIndicator(JsonObject status) {
+            if (loadAcknowledgementPending) return;
+            for (String source : List.of("ollama", "lmstudio")) {
+                String field = source.equals("ollama") ? "model_preload" : "lmstudio_preload";
+                if (!status.has(field) || !status.get(field).isJsonObject()) continue;
+                JsonObject preload = status.getAsJsonObject(field);
+                String name = string(preload, source.equals("ollama") ? "selected" : "model");
+                String key = source + ":" + name;
+                String phase = string(preload, "phase");
+                if ("loading".equals(phase)) {
+                    loadingIndicatorKey = key;
+                    loadingBar.begin();
+                } else if (key.equals(loadingIndicatorKey)
+                        || source.equals("lmstudio") && loadingIndicatorKey.startsWith("lmstudio:")) {
+                    if ("ready".equals(phase)) loadingBar.finish(true);
+                    else if ("error".equals(phase) || "off".equals(phase)) loadingBar.finish(false);
+                }
+            }
+            JsonObject generation = status.has("generation") && status.get("generation").isJsonObject()
+                    ? status.getAsJsonObject("generation") : new JsonObject();
+            String phase = string(generation, "phase");
+            String state = string(status, "status");
+            if ("loading".equals(phase) && "running".equals(state)) {
+                loadingIndicatorKey = "generation:" + string(status, "model");
+                loadingBar.begin();
+            } else if (loadingIndicatorKey.startsWith("generation:") && loadingBar.isLoading()) {
+                if (List.of("ready", "generating", "generated", "tool").contains(phase)) loadingBar.finish(true);
+                else if (List.of("failed", "cancelled").contains(state)) loadingBar.finish(false);
+            }
         }
 
         private void renderPlan(JsonObject status) {
@@ -1164,6 +1209,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         }
 
         @Override public void dispose() {
+            loadingBar.dispose();
             timer.stop();
             executor.shutdownNow();
         }
