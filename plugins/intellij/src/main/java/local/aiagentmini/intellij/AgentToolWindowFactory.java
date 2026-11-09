@@ -13,8 +13,6 @@ import com.intellij.ide.dnd.FileCopyPasteUtil;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.actionSystem.AnActionEvent;
 import com.intellij.openapi.actionSystem.CustomShortcutSet;
-import com.intellij.openapi.actionSystem.Presentation;
-import com.intellij.openapi.actionSystem.ex.CustomComponentAction;
 import com.intellij.openapi.extensions.PluginId;
 import com.intellij.openapi.project.DumbAwareAction;
 import com.intellij.openapi.fileEditor.FileEditorManager;
@@ -66,18 +64,44 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         toolWindow.getContentManager().addContent(content);
         content.setDisplayName(panel.mode.isSelected() ? "Agent" : "Chat");
         panel.mode.addActionListener(e -> content.setDisplayName(panel.mode.isSelected() ? "Agent" : "Chat"));
-        toolWindow.setTitleActions(List.of(new ModeSwitchAction(panel),
+        toolWindow.setTitleActions(List.of(
+                new DumbAwareAction("Start local agent", "Start or reconnect to the local backend", AllIcons.Actions.Execute) {
+                    @Override public void actionPerformed(@NotNull AnActionEvent event) { panel.start.doClick(); }
+                },
+                new DumbAwareAction("Stop", "Stop current request and clear queued messages", AllIcons.Actions.Suspend) {
+                    @Override public void actionPerformed(@NotNull AnActionEvent event) { panel.cancel.doClick(); }
+                    @Override public void update(@NotNull AnActionEvent event) { event.getPresentation().setEnabled(panel.started); }
+                },
                 new DumbAwareAction("New chat", "Start a new conversation (clears queued messages)", AllIcons.General.Add) {
                     @Override public void actionPerformed(@NotNull AnActionEvent event) { panel.newChat(); }
+                },
+                new DumbAwareAction("Settings", "Model source, context, tools and local sources", AllIcons.General.Settings) {
+                    @Override public void actionPerformed(@NotNull AnActionEvent event) { panel.optionsToggle.doClick(); }
                 }));
     }
 
-    private static final class ModeSwitchAction extends DumbAwareAction implements CustomComponentAction {
-        private final AgentPanel panel;
-        ModeSwitchAction(AgentPanel panel) { super("Agent / Chat", "Toggle Agent or Chat mode", null); this.panel = panel; }
-        @Override public void actionPerformed(@NotNull AnActionEvent event) { panel.mode.doClick(); }
-        @Override public @NotNull JComponent createCustomComponent(@NotNull Presentation presentation, @NotNull String place) {
-            return panel.mode;
+    private static final class ComposerSurface extends JPanel {
+        ComposerSurface() {
+            super(new BorderLayout(0, 6));
+            setOpaque(false);
+            setBorder(JBUI.Borders.empty(10));
+        }
+        @Override protected void paintComponent(Graphics graphics) {
+            Graphics2D g = (Graphics2D) graphics.create();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            Color fill = UIManager.getColor("TextField.background");
+            g.setColor(fill == null ? getBackground() : fill);
+            g.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 16, 16);
+            Color outline = UIManager.getColor(isFocusInside() ? "Component.focusColor" : "Component.borderColor");
+            if (outline == null) outline = Color.GRAY;
+            g.setColor(outline);
+            g.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 16, 16);
+            g.dispose();
+            super.paintComponent(graphics);
+        }
+        private boolean isFocusInside() {
+            Component focused = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
+            return focused != null && SwingUtilities.isDescendingFrom(focused, this);
         }
     }
 
@@ -133,6 +157,8 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         private final JButton cancel = iconButton(AllIcons.Actions.Suspend, "Stop current request and clear queued messages");
         private final JButton queueState = new JButton();
         private final JPanel toolbar = new JPanel(new BorderLayout(0, 3));
+        private final JButton attach = new JButton("@");
+        private String transcriptKey = "";
         private final ModelLoadingBar loadingBar = new ModelLoadingBar(JBUI.scale(6));
         private String loadingIndicatorKey = "";
         private boolean loadAcknowledgementPending;
@@ -171,7 +197,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                                      String skills, String mcpConfig, List<String> attachments) {}
 
         AgentPanel(Project project) {
-            super(new BorderLayout(6, 6));
+            super(new BorderLayout(0, 6));
             this.project = project;
             this.properties = PropertiesComponent.getInstance(project);
             selectedModel = properties.getValue("aiAgentMini.model", "");
@@ -183,7 +209,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             browser.setSelected(properties.getBoolean("aiAgentMini.browser", false));
             mode.setSelected(properties.getBoolean("aiAgentMini.agentMode", true));
             mode.setText(mode.isSelected() ? "Agent" : "Chat");
-            compactControl(mode, 68, "Click to switch Agent / Chat mode");
+            compactControl(mode, 64, "Click to switch Agent / Chat mode");
             mode.addActionListener(e -> {
                 mode.setText(mode.isSelected() ? "Agent" : "Chat");
                 properties.setValue("aiAgentMini.agentMode", mode.isSelected());
@@ -192,7 +218,6 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             model.setEditable(false);
 
             setBorder(JBUI.Borders.empty(4));
-            JPanel top = new JPanel(new BorderLayout());
             start.addActionListener(e -> execute(() -> {
                 SwingUtilities.invokeLater(() -> state.setText("Starting local agent…"));
                 ensureBackend();
@@ -236,7 +261,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             });
             ggufRow.add(chooseGguf, BorderLayout.WEST);
             ggufRow.add(ggufLabel, BorderLayout.CENTER);
-            compactControl(model, 180, "Choose a model, then click the load icon");
+            compactControl(model, 170, "Choose a model, then click the load icon");
             model.setMinimumSize(JBUI.size(105, 26));
             model.addActionListener(e -> {
                 if (rebuildingModels) return;
@@ -248,12 +273,11 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             modelRow.add(model, "model");
             modelRow.add(ggufQuick, "gguf");
             modelRow.setMinimumSize(JBUI.size(105, 26));
-            modelRow.setPreferredSize(JBUI.size(180, 26));
+            modelRow.setPreferredSize(JBUI.size(170, 26));
             refreshModels.addActionListener(e -> execute(() -> listModels()));
             // Stable preferred widths; a long status/error must never squeeze every control to "…".
             state.setMinimumSize(JBUI.size(0, 26));
             state.setPreferredSize(JBUI.size(0, 26));
-            top.add(toolbar, BorderLayout.CENTER);
             addComponentListener(new ComponentAdapter() {
                 @Override public void componentResized(ComponentEvent event) {
                     if (toolbarFitsOneRow() != wideToolbar) layoutToolbar();
@@ -370,6 +394,18 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             options.add(ggufRow);
             options.add(endpointRow);
             options.add(lmSourcesRow);
+            JPanel sourceSetting = new JPanel(new BorderLayout(8, 0));
+            sourceSetting.add(new JLabel("Model source"), BorderLayout.WEST);
+            sourceSetting.add(provider, BorderLayout.CENTER);
+            options.add(sourceSetting, 0);
+            JPanel contextSetting = new JPanel(new BorderLayout(8, 0));
+            contextSetting.add(new JLabel("Context tokens"), BorderLayout.WEST);
+            contextSetting.add(contextTokens, BorderLayout.CENTER);
+            options.add(contextSetting);
+            JPanel toolsSetting = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+            toolsSetting.add(mcp);
+            toolsSetting.add(browser);
+            options.add(toolsSetting);
             JPanel sorting = new JPanel(new BorderLayout(4, 0));
             sorting.add(new JLabel("Sort models"), BorderLayout.WEST);
             sorting.add(sortModels, BorderLayout.CENTER);
@@ -380,16 +416,25 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 if (optionsPopup.isVisible()) optionsPopup.setVisible(false);
                 else {
                     optionsPopup.setPopupSize(JBUI.scale(350), options.getPreferredSize().height + JBUI.scale(6));
-                    optionsPopup.show(optionsToggle, optionsToggle.getWidth() - optionsPopup.getPreferredSize().width,
-                            optionsToggle.getHeight());
+                    optionsPopup.show(this, Math.max(0, getWidth() - optionsPopup.getPreferredSize().width), 0);
                 }
             });
             layoutToolbar();
-            top.add(loadingBar, BorderLayout.SOUTH);
-            add(top, BorderLayout.NORTH);
 
             thread.setLayout(new BoxLayout(thread, BoxLayout.Y_AXIS));
-            thread.setBorder(BorderFactory.createEmptyBorder(8, 6, 8, 6));
+            thread.setBorder(JBUI.Borders.empty(12, 8));
+            transcriptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+            transcriptScroll.getViewport().addComponentListener(new ComponentAdapter() {
+                @Override public void componentResized(ComponentEvent event) {
+                    if (lastStatus != null) render(lastStatus);
+                    else {
+                        thread.removeAll();
+                        renderEmptyConversation();
+                        thread.revalidate();
+                        thread.repaint();
+                    }
+                }
+            });
             transcriptScroll.setBorder(BorderFactory.createEmptyBorder());
             transcriptScroll.getVerticalScrollBar().setUnitIncrement(16);
             JPanel center = new JPanel(new BorderLayout(4, 4));
@@ -419,6 +464,17 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
 
             JPanel bottom = new JPanel(new BorderLayout(4, 4));
             bottom.setBorder(BorderFactory.createEmptyBorder(5, 2, 2, 2));
+            ComposerSurface composer = new ComposerSurface();
+            Color inputBackground = UIManager.getColor("TextField.background");
+            if (inputBackground != null) prompt.setBackground(inputBackground);
+            prompt.setBorder(JBUI.Borders.empty(2));
+            promptScroll.setBorder(JBUI.Borders.empty());
+            promptScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+            prompt.setToolTipText("Ask a question, plan a change, or drop reference files here");
+            prompt.addFocusListener(new java.awt.event.FocusAdapter() {
+                @Override public void focusGained(java.awt.event.FocusEvent event) { composer.repaint(); }
+                @Override public void focusLost(java.awt.event.FocusEvent event) { composer.repaint(); }
+            });
             prompt.setLineWrap(true);
             prompt.setWrapStyleWord(true);
             prompt.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "sendPrompt");
@@ -440,11 +496,24 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             promptScroll.addComponentListener(new ComponentAdapter() {
                 @Override public void componentResized(ComponentEvent event) { resizeComposer(); }
             });
-            bottom.add(promptScroll, BorderLayout.CENTER);
+            composer.add(promptScroll, BorderLayout.CENTER);
             send.addActionListener(e -> capturePrompt(false));
-            bottom.add(send, BorderLayout.EAST);
+            attach.setToolTipText("Attach project files (Ctrl+/), or drop files here");
+            attach.setMargin(JBUI.insets(0, 6));
+            attach.addActionListener(e -> chooseAttachments());
+            JPanel footer = new JPanel(new BorderLayout(4, 0));
+            footer.setOpaque(false);
+            footer.add(toolbar, BorderLayout.CENTER);
+            JPanel sendSlot = new JPanel(new BorderLayout());
+            sendSlot.setOpaque(false);
+            sendSlot.add(send, BorderLayout.SOUTH);
+            footer.add(sendSlot, BorderLayout.EAST);
+            composer.add(footer, BorderLayout.SOUTH);
+            bottom.add(composer, BorderLayout.CENTER);
             JLabel keys = new JLabel("Enter: send · Shift+Enter: line · Alt+Enter: queue");
             keys.setFont(keys.getFont().deriveFont(10f));
+            keys.setMinimumSize(JBUI.size(0, 16));
+            keys.setPreferredSize(JBUI.size(0, 16));
             bottom.add(keys, BorderLayout.SOUTH);
             queueState.setVisible(false);
             queueState.setHorizontalAlignment(SwingConstants.LEFT);
@@ -458,9 +527,20 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             attachmentScroll.setPreferredSize(JBUI.size(0, 36));
             attachmentScroll.setVisible(false);
             draftDetails.add(attachmentScroll);
-            bottom.add(draftDetails, BorderLayout.NORTH);
+            draftDetails.setOpaque(false);
+            attachmentChips.setOpaque(false);
+            attachmentScroll.setOpaque(false);
+            attachmentScroll.getViewport().setOpaque(false);
+            composer.add(draftDetails, BorderLayout.NORTH);
+            JPanel runtime = new JPanel(new BorderLayout(0, 3));
+            state.setPreferredSize(JBUI.size(0, 18));
+            state.setMinimumSize(JBUI.size(0, 18));
+            state.setBorder(JBUI.Borders.empty(0, 6));
+            runtime.add(state, BorderLayout.CENTER);
+            runtime.add(loadingBar, BorderLayout.SOUTH);
+            bottom.add(runtime, BorderLayout.NORTH);
             keys.setText(keys.getText() + " · Ctrl+/: files · Drop files to attach");
-            keys.setToolTipText("Attach up to 8 text, PDF or DOCX files, 2 MB each. Click an attachment to remove it.");
+            keys.setToolTipText(keys.getText() + ". Attach up to 8 text, PDF or DOCX files, 2 MB each. Click a chip to remove it.");
             new DumbAwareAction("Attach project files") {
                 @Override public void actionPerformed(@NotNull AnActionEvent event) { chooseAttachments(); }
             }.registerCustomShortcutSet(new CustomShortcutSet(KeyStroke.getKeyStroke(KeyEvent.VK_SLASH,
@@ -475,6 +555,7 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             state.setToolTipText("Choose a model, then Start. Workspace: " + project.getBasePath());
             if (provider.getSelectedIndex() != 1) execute(() -> listModels());
             updateSelection();
+            renderEmptyConversation();
         }
 
         private void chooseAttachments() {
@@ -545,9 +626,8 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
         }
 
         private boolean toolbarFitsOneRow() {
-            int needed = JBUI.scale(12);
-            for (JComponent control : new JComponent[]{start, cancel, provider, modelRow, refreshModels,
-                    load, optionsToggle, effort, contextTokens, mcp, browser})
+            int needed = JBUI.scale(70);
+            for (JComponent control : new JComponent[]{mode, modelRow, attach, refreshModels, load, effort})
                 if (control.isVisible()) needed += control.getPreferredSize().width + JBUI.scale(3);
             return getWidth() >= needed;
         }
@@ -557,8 +637,11 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             toolbar.removeAll();
             JPanel first = new JPanel(new GridBagLayout());
             JPanel second = wideToolbar ? first : new JPanel(new GridBagLayout());
-            JComponent[] primary = {start, cancel, provider, modelRow, refreshModels, load, optionsToggle};
-            JComponent[] secondary = {effort, contextTokens, mcp, browser, state};
+            first.setOpaque(false);
+            second.setOpaque(false);
+            toolbar.setOpaque(false);
+            JComponent[] primary = {mode, modelRow, attach};
+            JComponent[] secondary = {effort, refreshModels, load};
             int column = 0;
             for (JComponent control : primary) toolbarCell(first, control, column++, 0);
             if (!wideToolbar) {
@@ -566,7 +649,8 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 column = 0;
             }
             for (JComponent control : secondary)
-                toolbarCell(second, control, column++, control == state ? 1 : 0);
+                toolbarCell(second, control, column++, 0);
+            toolbarCell(second, new JLabel(), column, 1);
             toolbar.add(first, BorderLayout.NORTH);
             if (!wideToolbar) toolbar.add(second, BorderLayout.SOUTH);
             toolbar.revalidate();
@@ -584,6 +668,19 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             promptScroll.setPreferredSize(new Dimension(0, rows * lineHeight + JBUI.scale(8)));
             promptScroll.revalidate();
             revalidate();
+        }
+
+        private void renderEmptyConversation() {
+            JPanel welcome = new JPanel();
+            welcome.setLayout(new BoxLayout(welcome, BoxLayout.Y_AXIS));
+            welcome.setOpaque(false);
+            welcome.setBorder(JBUI.Borders.empty(28, 10));
+            int width = Math.max(160, transcriptScroll.getViewport().getWidth() - JBUI.scale(48));
+            welcome.add(ChatMarkdown.view("## What are we working on?\n\nAsk a question, explore this project, or plan a change."
+                    + "\n\n**@** Attach project files · Agent edits and runs with approval", width, thread.getBackground()));
+            welcome.setAlignmentX(Component.LEFT_ALIGNMENT);
+            welcome.setMaximumSize(new Dimension(Integer.MAX_VALUE, welcome.getPreferredSize().height));
+            thread.add(welcome);
         }
 
         private void newChat() {
@@ -1094,7 +1191,11 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             String error = string(status, "error");
             if (error.isBlank()) error = string(lmPreload, "error");
             boolean modelLoading = "loading".equals(phase) || "loading".equals(string(lmPreload, "phase"));
-            state.setText(!error.isBlank() ? "Error" : modelLoading ? "Loading…" : string(status, "status"));
+            boolean waiting = status.has("pending_tool") && status.get("pending_tool").isJsonObject();
+            String activity = !error.isBlank() ? "Error — hover for details" : modelLoading ? "Loading model…"
+                    : waiting ? "Waiting for tool approval" : "running".equals(string(status, "status"))
+                    ? "Working… · Alt+Enter queues your next message" : "Ready · " + project.getName();
+            state.setText(activity);
             state.setToolTipText(project.getBasePath() + " · " + string(status, "status")
                     + (error.isBlank() ? "" : " · " + error));
             boolean loading = status.has("model_preload") && status.get("model_preload").isJsonObject()
@@ -1106,11 +1207,21 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
             cancel.setEnabled(started);
             send.setEnabled(!requestRunning && !loadingModel && !submissionPending && queued.size() == 0);
             renderPlan(status);
+            renderConversation(status);
+            renderApproval(status);
+            revalidate();
+            drainQueue();
+        }
+
+        private void renderConversation(JsonObject status) {
+            int availableWidth = Math.max(170, transcriptScroll.getViewport().getWidth() - JBUI.scale(16));
+            String key = availableWidth + ":" + status.get("conversation") + ":" + expandedActivity;
+            if (key.equals(transcriptKey)) return;
+            transcriptKey = key;
             JScrollBar scroll = transcriptScroll.getVerticalScrollBar();
             boolean atBottom = scroll.getValue() + scroll.getVisibleAmount() >= scroll.getMaximum() - 24;
             int previous = scroll.getValue();
             thread.removeAll();
-            int availableWidth = Math.max(170, transcriptScroll.getViewport().getWidth() - 14);
             if (status.has("conversation") && status.get("conversation").isJsonArray()) {
                 int index = 0;
                 for (JsonElement item : status.getAsJsonArray("conversation")) {
@@ -1118,19 +1229,23 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                         JsonObject message = item.getAsJsonObject();
                         JPanel row = new JPanel(new BorderLayout());
                         boolean user = "user".equals(string(message, "role"));
-                        int width = user ? Math.max(170, Math.min(640, (int) (availableWidth * 0.75))) : availableWidth;
+                        int width = user ? Math.max(170, Math.min(640, (int) (availableWidth * 0.94))) : availableWidth;
                         row.add(messageBubble(message, index, width), user ? BorderLayout.WEST : BorderLayout.CENTER);
                         row.setAlignmentX(Component.LEFT_ALIGNMENT);
                         row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
                         thread.add(row);
-                        thread.add(Box.createVerticalStrut(7));
+                        thread.add(Box.createVerticalStrut(18));
                     }
                     index++;
                 }
             }
+            if (thread.getComponentCount() == 0) renderEmptyConversation();
             thread.revalidate();
             thread.repaint();
             SwingUtilities.invokeLater(() -> scroll.setValue(atBottom ? scroll.getMaximum() : previous));
+        }
+
+        private void renderApproval(JsonObject status) {
             if (status.has("pending_tool") && status.get("pending_tool").isJsonObject()) {
                 JsonObject pending = status.getAsJsonObject("pending_tool");
                 String id = string(pending, "id");
@@ -1161,8 +1276,6 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
                 pendingId = "";
                 approval.setVisible(false);
             }
-            revalidate();
-            drainQueue();
         }
 
         private void updateLoadingIndicator(JsonObject status) {
@@ -1222,19 +1335,26 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
 
         private JPanel messageBubble(JsonObject message, int index, int width) {
             boolean user = "user".equals(string(message, "role"));
-            Color background = UIManager.getColor(user ? "TextField.background" : "EditorPane.background");
+            Color background = user ? UIManager.getColor("TextField.background") : thread.getBackground();
             if (background == null) background = getBackground();
-            Color outline = UIManager.getColor("Separator.foreground");
-            if (outline == null) outline = Color.GRAY;
-            JPanel bubble = new JPanel(new BorderLayout(0, 5));
+            JPanel bubble = user ? new ComposerSurface() : new JPanel(new BorderLayout(0, 8));
             bubble.setBackground(background);
-            bubble.setBorder(BorderFactory.createCompoundBorder(
-                    BorderFactory.createLineBorder(outline),
-                    BorderFactory.createEmptyBorder(8, 10, 8, 10)));
-            JLabel heading = new JLabel(user ? "You" : "Agent");
+            bubble.setBorder(JBUI.Borders.empty(user ? 10 : 4, 10));
+            JLabel heading = new JLabel(user ? "You" : "✦ AI Agent Mini");
             heading.setFont(heading.getFont().deriveFont(Font.BOLD));
+            heading.setPreferredSize(new Dimension(Math.max(120, width - 20), heading.getPreferredSize().height));
             bubble.add(heading, BorderLayout.NORTH);
-            bubble.add(wrappedText(string(message, "text"), width - 20, background), BorderLayout.CENTER);
+            String text = string(message, "text");
+            if (user && text.startsWith("Active editor: ") && text.contains("\n")) {
+                int newline = text.indexOf('\n');
+                String editor = text.substring("Active editor: ".length(), newline);
+                heading.setText("You · " + (editor.length() > 55 ? "…" + editor.substring(editor.length() - 54) : editor));
+                heading.setToolTipText("Active editor: " + editor);
+                text = text.substring(newline + 1);
+            }
+            if (text.isBlank() && "working".equals(string(message, "state"))) text = "Working…";
+            bubble.add(user ? wrappedText(text, width - 20, background)
+                    : ChatMarkdown.view(text, width - 20, background), BorderLayout.CENTER);
             if (user && message.has("attachments") && message.get("attachments").isJsonArray()) {
                 StringBuilder names = new StringBuilder();
                 for (JsonElement file : message.getAsJsonArray("attachments")) {
@@ -1297,8 +1417,9 @@ public final class AgentToolWindowFactory implements ToolWindowFactory {
 
         private JTextArea wrappedText(String text, int width, Color background) {
             JTextArea area = new JTextArea(text.isBlank() ? " " : text);
+            area.setFont(UIManager.getFont("Label.font"));
             area.setEditable(false);
-            area.setFocusable(false);
+            area.setFocusable(true);
             area.setLineWrap(true);
             area.setWrapStyleWord(true);
             area.setBackground(background);
